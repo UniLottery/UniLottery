@@ -1,0 +1,799 @@
+ <!DOCTYPE html>
+<html>
+    <head>
+        <meta content="text/html;charset=utf-8" http-equiv="Content-Type">
+        <meta content="utf-8" http-equiv="encoding">
+
+        <title>UniLottery</title>
+        <link rel="icon" href="ul-logo.png">
+
+        <style>
+            body {
+                background-color: #303236;
+                color: #0ccc33;
+                font-family: "Lucida Console", monospace;
+                text-align: center;
+                min-width: 750px;
+            }
+
+            a {
+                color: #e3e036;
+                font-size: 100%;
+                text-decoration: none;
+            }
+
+            a.playButton {
+                color: cyan;
+            }
+
+            a.prizeClaimButton {
+                color: cyan;
+            }
+
+            a:hover {
+                color: #ab2eab;
+            }
+
+            table {
+                border-collapse: collapse;
+                margin: auto;
+            }
+
+            table, th, td {
+                border: 2px solid #ab2eab;
+            }
+
+            table td:nth-child(1) {
+                text-align: right;
+                padding-right: 5px;
+            }
+
+            table td:nth-child(2) {
+                text-align: left;
+                padding-left: 5px;
+                font-weight: bold;
+            }
+
+            .roundbord {
+                border: 2px solid #ab2eab;
+                border-radius: 8px;
+                padding: 12px;
+            }
+
+            #title {
+                font-weight: bold;
+                font-size: 50px;
+                height: 100px;
+                display: table;
+                width: 100%;
+            }
+
+            .grid-container {
+                display: grid;
+                grid-template-columns: 50% 50%;
+                grid-gap: 20px 20px;
+            }
+
+        </style>
+    </head>
+
+    <body>
+        <script src="https://cdn.jsdelivr.net/gh/ethereum/web3.js@1.2.11/dist/web3.min.js"></script>
+        <script src="contracts.js"></script>
+        <script src="configView.js"></script>
+        <script src="getLotteryConfig.js"></script>
+        <script src="main.js"></script>
+        <script src="lotTools.js"></script>
+
+        <div id="title">
+            <div style="display:table-cell; vertical-align:middle;">
+                <img id="title_pic1" style="max-height: 100px"></img>
+            </div>
+            <div style="display:table-cell; vertical-align:middle;">
+                <span id="title_uni"> Uni</span><span \
+                      id="title_lottery">Lottery </span>
+            </div>
+            <div style="display:table-cell; vertical-align:middle;">
+                <img id="title_pic2" style="max-height: 100px"></img>
+            </div>
+        </div>
+        <br>
+        <hr>
+
+        <div id="navbar" style="display:table; table-layout: fixed;
+                                width:100%; border:1px solid #ab2eab">
+            <br>
+            <div style="display:table-row">
+                <div style="display:table-cell; text-align:center;">
+                    <a href="javascript:navbar_mainPage()">[ Main Page ]</a>
+                </div>
+                
+                <div style="display:table-cell; text-align:center;">
+                    <a href="javascript:navbar_lotteryList()">[ Lottery List ]</a>
+                </div>
+
+                <div style="display:table-cell; text-align:center;">
+                    <a href="javascript:navbar_stats()">[ Pool Stats ]</a>
+                </div>
+
+                <div style="display:table-cell; text-align:center;">
+                    <a href="javascript:navbar_about()">[ About ]</a>
+                </div>
+            </div>
+            <br>
+        </div>
+        <hr>
+
+        <div id="EnableButtons">
+            <div id="button_unlockWallet" style="float:left">
+                <a href="javascript:enableEthAccounts()" >
+                    [ Unlock Wallet ]</a>
+            </div>
+            
+            <div id="NetworkInfo" style="float:right">[ Network ]</div>
+
+            <br>
+        </div>
+        <hr>
+
+        <div id="content"></div>
+
+        <div id="footer">
+            <br>
+            <hr>
+            <a href="https://github.com/UniLottery/UniLottery">[ GitHub ]</a>
+            <a href="https://twitter.com/UniLottery">[ Twitter ]</a>
+            <a href="https://t.me/unilottery">[ Telegram ]</a>
+            <br>
+            <br>
+        </div>
+
+    </body>
+
+    <!-- Specific section markups. -->
+
+    <!-- Main Page. -->
+    <div id="div_MainPage" style="display:none">
+        <div class="currentLottery">
+            <a href="javascript:showCurrentLotteryData()" \
+               style="font-size: 180%; font-weight: bold; 
+                      text-decoration: underline;" >
+               Current Lottery:
+            </a>
+            <br> <br>
+
+            <a class="playButton" href="javascript:playButton_action()" \
+               style="font-size: 300%; font-weight: bold;" >
+            </a>
+            <br> <br>
+
+            <div class="referralSection" style="display:none">
+                <div class="registerRef">
+                    <a href="javascript:currLot_registerRef()" \
+                       style="font-size: 150%; font-weight: bold;" >
+                       [ Register Referral ]
+                    </a>
+                    <div class="registerRef_msg"></div>
+                </div>
+                <br> <br>
+
+                <div class="generateRef">
+                    <a href="javascript:currLot_generateRef()" \
+                       style="font-size: 150%; font-weight: bold;" >
+                       [ Generate Referral ID ]
+                    </a>
+                </div>
+                <br> <br>
+            </div>
+        </div>
+        <hr>
+
+        <div class="About_short" style="padding: 30px">
+            <h1>What is UniLottery?</h1>
+            <p>
+                UniLottery is a fully decentralized, trustless, and 
+                automated Uniswap-based lottery protocol, which combines
+                the safe gains of early-trading Locked Liquidity tokens 
+                for at least several hours until specific conditions apply,
+                and the huge profits the scammers get from rug-pulls - 
+                but in case of UniLottery - the profits are used as lottery
+                winner funds!
+            </p>
+            <h2>Want to play? Here's how!</h2>
+
+            <div class="grid-container">
+                <div class="roundbord">
+                    <h3>Trade!</h3>
+                    <p style="text-align:left">
+                        Trade ULT tokens on Uniswap, and make juicy gainz!
+                        The more tokens you buy, the more ETH you contribute
+                        to Uniswap LP, and the LATER you buy in (!), the
+                        more chances of becoming a Lottery Winner you get!
+                        <br>
+                        However, for selling, everything is reversed!
+                    </p>
+                </div>
+
+                <div class="roundbord">
+                    <h3>Refer other players!</h3>
+                    <p style="text-align:left">
+                        Want to increase your Player Score up to 
+                        <b>100 points</b> ?!
+                        <br>
+                        You can become a referrer by generating your 
+                        Referral ID, and then give that ID to other players,
+                        who, after buying some tokens, can register that ID.
+                        <br>
+                        When they register, they get 
+                        <b>Referree Bonus: 5 points!</b>
+                        <br>
+                        And the Referrer, whose ID was registered, will get
+                        <b>bonus points derived from every referree's player
+                        score!</b>
+                        <br>
+                        So, if you refer several players who get large 
+                        scores, their scores propagate back to your 
+                        score too!
+                    </p>
+                </div>
+
+                <div class="roundbord">
+                    <h3>Mine!</h3>
+                    <p style="text-align:left">
+                        UniLottery utilizes "Mining" approach to execute the
+                        lottery ending procedures (moving liquidity and 
+                        executing part of winner selection algorithm),
+                        to increace decentralization.
+                        <br>
+                        Everyone can become a Miner, by executing the Mine
+                        function on the lottery which just finished!
+                        <br>
+                        Miners get 1% of lottery surplus ETH from Uniswap LP,
+                        so, for example, if lottery's surplus on finish is
+                        50 ETH, Miner gets 0.5 ETH, and gas fees are much
+                        smaller than that, so - profit!
+                        <br>
+                        However, you have to be fast - there's only 1-2
+                        mining operations per lottery!
+                    </p>
+                </div>
+
+                <div class="roundbord">
+                    <h3>Claim Prizes!</h3>
+                    <p style="text-align:left">
+                        After Mining is complete, Lottery Winners can
+                        finally claim their prizes!
+                        <br>
+                        Number of winners is random, and can even be
+                        higher than the number of lottery token holders!
+                        <br>
+                        The #1 winner can get up to 100% of winner funds,
+                        but in practice, most winners will get from 1% to 
+                        25% of total winner funds.
+                        <br><br>
+                        Randomness factor is added to player score, to
+                        form the Final Score, to determine winners.
+                        Default RandRatio is 1:4, so, player score's
+                        weight is 20%, and random score's weight is 80%.
+                        <br>
+                        We can see that the highest-scoring players
+                        basically guarantee themselves a solid prize,
+                        which in most cases will be much higher than what
+                        they contributed during the trading stage!
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Lottery Info. -->
+    <div id="div_lotteryInfo" style="display:none">
+        <h2>Lottery <span class="li_lotteryAddress"></span></h2>
+
+        <a href="#" onclick="refreshLotteryInfo();return false;">
+            [ Refresh ]</a>
+        <a class="li_LotEtherscan">[ Etherscan - Lottery Token ]</a>
+        <a class="li_StorEtherscan">[ Etherscan - Lottery Storage ]</a>
+        <a class="li_UniswapInfo">[ Uniswap.info ]</a>
+
+        <br>
+        <hr>
+
+        <p class="li_winInfo_p" style="display:none"></p>
+
+        <br>
+        <a class="playButton" href="javascript:playButton_action()" \
+           style="font-size: 220%; font-weight: bold;" >
+        </a>
+        <br>
+        <br>
+
+        <div class="referralSection" style="display:none">
+            <div class="registerRef">
+                <a href="javascript:currLot_registerRef()" \
+                   style="font-size: 120%; font-weight: bold;" >
+                   [ Register Referral ]
+                </a>
+                <div class="registerRef_msg"></div>
+            </div>
+            <br>
+
+            <div class="generateRef">
+                <a href="javascript:currLot_generateRef()" \
+                   style="font-size: 120%; font-weight: bold;" >
+                   [ Generate Referral ID ]
+                </a>
+            </div>
+            <br>
+        </div>
+        <hr>
+
+        <h2>Conditions for liquidity unlock & lottery finish</h2>
+        <p>
+            Lottery will enter FINISHING stage (when liquidity can be
+            unlocked on randomly selected transaction), when ALL of these
+            conditions will be reached:
+        </p>
+        <table>
+            <tr>
+                <td>Uptime (Time since start)</td>
+                <td class="li_finCond_timeSinceStart"></td>
+            </tr>
+            <tr>
+                <td>Winner Funds (<span \
+                    class="li_winFundPercentage"></span> of net profits)</td>
+                <td class="li_finCond_surplusEth"></td>
+            </tr>
+            <tr>
+                <td>Number of Token Holders</td>
+                <td class="li_finCond_numberOfHolders"></td>
+            </tr>
+        </table>
+        <p>
+            If these conditions are not satisfied, Uniswap liquidity is
+            FULLY LOCKED, so you can safely trade tokens without fearing of
+            liquidity getting removed.
+            <br>
+            However, the token sells which could drop the current winner funds
+            below <span class="li_winFundsDenySells" \
+                        style="font-weight:bold; font-size:120%"></span>
+            will be rejected (transaction will revert) !
+            <br>
+            This would of course apply only after that amount is reached.
+        </p>
+
+        <br>
+        <hr>
+
+        <h2>Deflationary properties</h2>
+        <p>
+            Token is deflationary - for every transaction, a percentage of
+            amount transacted is burned, to increase scarcity and discourage
+            selling.
+            Token utilizes "smart burning" - uses different burn rates for
+            buyers, and different for other token transfers, including sells.
+            <br>
+            The burn rates:
+            <br>
+            <ul style="font-weight:bold; font-size:120%">
+                <li>Buyer Rate: <span class="li_burn_buy"></span></li><br>
+                <li>Default (Seller) Rate: <span class="li_burn_sell"></span>
+                </li>
+            </ul>
+        </p>
+
+        <br>
+        <hr>
+
+        <h2>Current Lottery State</h2>
+        <table class="li_currentState">
+            <tr>
+                <td>Lottery Stage</td>
+                <td class="li_lotteryStage" style="font-weight: bold;"></td>
+            </tr>
+
+            <tr>
+                <td>Current Winner Funds (<span \
+                    class="li_winFundPercentage"></span> of net profits)</td>
+                <td class="li_winnerFunds" style="font-weight: bold;"></td>
+            </tr>
+
+            <tr>
+                <td>Number of Token Holders</td>
+                <td class="li_holderCount" style="font-weight: bold;"></td>
+            </tr>
+            
+            <tr>
+                <td>Uptime (Time since Start)</td>
+                <td class="li_uptime" style="font-weight: bold;"></td>
+            </tr>
+
+            <tr class="li_FinProb_p" style="display:none">
+                <td>Finish Probability</td>
+                <td class="li_FinProb" style="font-weight: bold;"></td>
+            </tr>
+
+            <tr class="li_startDate_p">
+                <td>Start Date</td>
+                <td class="li_startDate" style="font-weight: bold;"></td>
+            </tr>
+
+            <tr class="li_completionDate_p" style="display:none">
+                <td>Completion Date</td>
+                <td class="li_completionDate" style="font-weight: bold;"></td>
+            </tr>
+
+            <tr class="li_ending_profitAmount_p" style="display:none">
+                <td>Lottery Gross Profits</td>
+                <td class="li_ending_profitAmount" style="font-weight: bold;"></td>
+            </tr>
+        </table>
+        <br>
+        <hr>
+
+        <div class="li_checkHolderData">
+            <h2>Check Holder Data & Win Status</h2>
+
+            <form action="javascript:lot_checkHolderData()">
+                <label for="addr">Address to check:</label><br>
+                <input type="text" class="li_check_addr" name="addr" \
+                       style='min-width:350px'>
+                <input type="submit" value="Submit"><br>
+            </form>
+
+            <div class="li_holderData_div"></div>
+
+            <br>
+            <hr>
+        </div>
+
+        <div class="li_lotteryConfig">
+            <h2>Lottery Config (Advanced)</h2>
+            <div class="li_lotteryConfig_cont"></div>
+            <hr>
+            <br>
+        </div>
+    </div>
+
+    <!-- Lottery List. -->
+    <div id="div_lotteryList" style="display:none">
+        <h2>Open the Lottery Page for specific Lottery Address</h2>
+
+        <form action="javascript:form_openLotteryPage()">
+            <input type="text" class="ll_open_addr" style='min-width:350px'>
+            <input type="submit" value="Submit"><br>
+        </form>
+        <div class="ll_open_addr_info"></div>
+        <br>
+        <hr>
+
+        <h2>All lotteries performed</h2>
+
+        <table class="ll_lotteryListTable">
+            <tr>
+                <th>Lottery</th>
+                <th>Start Date</th>
+                <th>Stage</th>
+                <th>Your wallet's win status</th>
+            </tr>
+        </table>
+    </div>
+
+    <!-- Pool Stats. -->
+    <div id="div_poolStats" style="display:none">
+        <h1>Pool Stats</h1>
+        <h2>General Info</h2>
+        <table>
+            <tr>
+                <td>Total Pool Funds</td>
+                <td class="ps_totalPoolFunds"></td>
+            </tr>
+            <tr>
+                <td>Lottery Run Mode</td>
+                <td class="ps_lotteryRunMode"></td>
+            </tr>
+            <tr>
+                <td>Last Auto-Lottery Started</td>
+                <td class="ps_lastAutoLotteryStart"></td>
+            </tr>
+            <tr>
+                <td>Last Auto-Lottery Ended</td>
+                <td class="ps_lastAutoLotteryEnd"></td>
+            </tr>
+            <tr>
+                <td>Auto Mode: Next Lottery Delay (secs)</td>
+                <td class="ps_autoNextLotteryDelay"></td>
+            </tr>
+        </table>
+        <br>
+        <hr>
+
+        <h2>Next Lottery Config</h2>
+        <div class="ps_nextLotteryConfig"></div>
+        <br>
+        <hr>
+
+        <h2>Default Lottery Config Template</h2>
+        <div class="ps_defaultLotteryConfig"></div>
+        <br>
+        <hr>
+    </div>
+
+    <!-- Pool Stats. -->
+    <div id="div_about" style="display:none">
+    <div style="text-align: left; padding: 30px">
+        <h1>UniLottery - Liquidity Pools turned to Trustless Lottery</h1>
+        <p class="roundbord">
+            UniLottery is a fully decentralized, trustless, and automated 
+            Ethereum lottery ecosystem, utilizing tradeable ERC-20 tokens 
+            as "smart lottery tickets", and operating on decentralized 
+            liquidity pool-based exchange Uniswap.
+            <br>
+            Uniswap is used to distribute and track UniLottery (ULT) tokens.
+            Every lottery spawned by UniLottery Main Pool is a separate 
+            token. 
+            <br>
+            Lottery Token Contracts check the state of lottery ecosystem
+            on every token transfer, and when specific conditions are met
+            (time active, number of holders, ETH amount in Uniswap LP), 
+            lottery finishes.
+            <br>
+            After finish, on ENDING stage, during the Mining operation,
+            all liquidity from Uniswap's LP is removed, and nearly all of
+            surplus ETH obtained is put to the Winner Prize Fund, from
+            which the lottery winners are then be able to claim their 
+            prizes.
+            <br>
+            All of the lottery tokens are deployed and liquidity is
+            provided automatically and trustlessly, and winner selection
+            is done using true random seed obtained from Provable oracle
+            service.
+            Ending operations also utilize "Lottery Miners", who can earn
+            part of lottery profits when executing mining operations.
+            <br>
+            All ULT token liquidity is FULLY LOCKED for whole lottery
+            active lifetime stage, during which token trading is safe,
+            as you can't get rug-pulled.
+            <br>
+            Anyone can track lottery stage, ending conditions, and
+            finish probability on our website.
+        </p>
+
+        <div class="roundbord">
+        <h2>How to profit from UniLottery?</h2>
+        <p>
+            One can profit by participating in UniLottery in these ways:
+        </p>
+        <ul>
+            <li>
+                Significant gains from trading UniLottery Tokens: as 
+                initial ULT token liquidity is all in Uniswap, and market 
+                cap is very low, by getting on early one can make 
+                significant gains. Also, on ACTIVE stage there's no risk of
+                rug-pulling, because token liquidity is locked in ULT 
+                smart contract itself for whole ACTIVE stage.
+            </li><br>
+
+            <li>
+                Win lottery prizes: After lottery ends, 80% of profits
+                from liquidity removal are dedicated to Lottery Winners,
+                who are determined using a complex but fair
+                Winner-Selection-Algorithm. Algorithm is based on 
+                player score, which is comprized of the following parts,
+                and can range from <b>1 to 200 points</b>.
+                <br> <br>
+                Randomness factor is added to this player score on 
+                lottery's end, when running winner selection algorithm, to
+                form the Final Score, to determine final winners.
+                <br>
+                RandRatio defines how much weight randomness has in
+                the final score.
+                <br>
+                Default RandRatio is 1:4, so, player score's
+                weight is 20%, and random score's weight is 80%.
+                <br>
+                <br>
+                <b>Player Score's components:</b>
+                <br>
+                <br>
+                <ol>
+                    <li>
+                        Ether Contributed: the more ETH you contribute, 
+                        the more chances of winning you get! By selling 
+                        tokens, you lose points, and by buying, you get 
+                        points. 
+                        <br>
+                        <b>Weight: 40 points</b>
+                    </li><br>
+
+                    <li>
+                        Time-factor: the later you buy, the more chances 
+                        to win you get! This is implemented to compensate
+                        for price differences when getting in early and
+                        later, and to encourage later buyers.
+                        <br>
+                        <b>Weight: 30 points</b>
+                    </li><br>
+
+                    <li>
+                        Token Balance: amount of Lottery Tokens you have.
+                        By buying early, you can get high scores on this!
+                        <br>
+                        <b>Weight: 30 points</b>
+                    </li><br>
+
+                    <li>
+                        Referral System: holders can use this to refer 
+                        other holders who can register their Referral ID.
+                        Referrers get additional points for each referree! 
+                        Referees earn bonus points by registering referral!
+                        <br>
+                        <b>Weight: 100 points</b>
+                    </li><br>
+                </ol>
+                <br>
+
+            <li>
+                Lottery Mining: By executing "mining" operations on 
+                finishing lotteries, you earn a part of profits dedicated 
+                to miners - "Mining Rewards". 
+                These can go as far as 1-2% of total profits. 
+                Usually it's only a single mine operation per lottery, so 
+                if lottery earns 100 ETH of profits, and mining reward is 
+                1%, miner gets 1 ETH for an operation! 
+                Gas cost is ~600,000 gas, so it's a profit!
+            </li><br>
+        </ul>
+        </div>
+        <br>
+
+        <div class="roundbord">
+        <h2>UniLottery Ecosystem Contracts Overview</h2>
+        <p>
+            UniLottery Ecosystem is comprised of 6 core contracts, which
+            have been deployed only once, and an unlimited number of 
+            individual LotteryStub and LotteryStorageStub contracts, which 
+            are deployed automatically by Factories, when new lottery
+            starts.
+            <br>
+            <br>
+            The Contracts:
+        </p>
+        <ol>
+            <li>
+                <b>UniLotteryPool</b> - the main controller contract, which
+                governs the top-level state of the ecosystem.
+                UniLottery Owner (OWNER_ADDRESS) can provide and withdraw
+                liquidity from this pool, which is used as initial
+                liquidity for future lotteries.
+                <br>
+                Finished lotteries transfer part of their surplus ETH
+                as profits back to pool, while the rest of surplus ETH
+                stay in lottery contracts and are used as winner prizes.
+                <br>
+                The Pool initiates all new lottery creations, manually,
+                or automatically, using Scheduled Callbacks.
+            </li><br>
+
+            <li>
+                <b>RandomnessProvider</b> - an abstraction and encapsulation
+                contract acting as an interface to Provable oracle
+                services, which are used to obtain random seeds for
+                Lottery winner selection algorithm, when lotteries end.
+                <br>
+                Also, utilizing Provable Scheduled Callback functionality,
+                RandomnessProvider can be used to schedule Auto-Lotteries
+                to be run automatically - when one lottery ends, another
+                begins.
+            </li><br>
+
+            <li>
+                <b>LotteryFactory</b> - a Factory contract which creates
+                new lotteries (which are composed of a LotteryStub
+                contract, and LotteryStorageStub contract).
+                <br>
+                On initial deployment, this factory also deployed the
+                "Lottery" contract, which contains code for all 
+                individual lottery token contracts (LotteryStubs).
+            </li><br>
+
+            <li>
+                <b>StorageFactory</b> - a Factory contract which creates
+                new LotteryStorageStub contracts, which are then passed
+                to LotteryFactory to integrate into the Lottery Token
+                (comprised of LotteryStub and LotteryStorageStub).
+                <br>
+                On initial deployment, this factory also deployed the
+                "LotteryStorage" contract, which contains code for all 
+                individual lottery storage contracts (LotteryStorageStubs).
+            </li><br>
+
+            <li>
+                <b>Lottery</b> - the Logic contract, which contains all
+                code for Lottery Token implementation.
+                <br>
+                Individual Lottery Tokens (LotteryStub contracts) use
+                "DelegateCall" EVM technique to execute this code on
+                their contract behalf (using LotteryStub's state and
+                address as "this", but executing Lottery's code).
+                <br>
+                This pattern is used to greatly reduce deployment costs,
+                as individual lottery (LotteryStub) contracts don't have
+                to contain all the code, which would otherwise be
+                duplicated.
+            </li><br>
+
+            <li>
+                <b>LotteryStorage</b> - the Logic contract, which contains
+                all code for LotteryStorageStub's implementation.
+                <br>
+                The same pattern is used as for Lottery and LotteryStub,
+                but this time, it's for LotteryStorageStub.
+            </li><br>
+
+            <li>
+                <b>LotteryStub</b> - the Proxy Stub contract used as
+                Lottery Token Contract for every lottery to be deployed.
+                <br>
+                This contract DelegateCalls the Lottery contract to
+                execute actual code on it's behalf.
+                <br>
+                This is the actual ERC20 token contract that traders use
+                to trade on Uniswap, and also to perform all other lottery
+                tasks, such as referral management, mining, and prize
+                claiming.
+            </li><br>
+
+            <li>
+                <b>LotteryStorageStub</b> - the Proxy Stub contract used
+                as LotteryStorage contract by every lottery deployed.
+                <br>
+                This contract's use is purely internal - it's used by
+                the Lottery Token to store all Holder Data (player score
+                parameters, etc.), and also, this contract executes
+                all the Winner Selection Algorithms, because they
+                require fast access to holder data, which is stored
+                in this contract's state.
+            </li><br>
+        </ol>
+        </div>
+        <br>
+
+        <div class="roundbord">
+        <h3>UniLottery Workflow Diagram</h3>
+        <img src="UniLotteryDiagram.svg" style="width:100%"></img>
+
+        </div>
+        <br>
+
+        <div class="roundbord">
+            <h2>UniLottery Ecosystem Contracts on Etherscan</h2>
+            <a class="ab_mainPool">[ Main UniLottery Pool ]</a><br>
+            <a class="ab_lotteryFactory">[ Lottery Factory ]</a><br>
+            <a class="ab_storageFactory">[ Storage Factory ]</a><br>
+            <a class="ab_randomProvider">[ Randomness Provider ]</a><br>
+            <a class="ab_lotteryImpl">[ Lottery Token (implementation) ]</a><br>
+            <a class="ab_storageImpl">[ Lottery Storage (implementation) ]</a><br>
+            <a class="ab_lotteryStub">[ Latest Lottery Token Stub (proxy) ]</a><br>
+            <a class="ab_storageStub">[ Latest Lottery Storage Stub (proxy) ]</a><br>
+        </div>
+        <br>
+
+        <div class="roundbord">
+            <h2>Contacts</h2>
+            <p>
+                <a href="https://github.com/UniLottery/UniLottery">[ GitHub ]</a>
+                <br>
+                <a href="https://twitter.com/UniLottery">[ Twitter ]</a>
+                <br>
+                <a href="https://t.me/unilottery">[ Telegram ]</a>
+            </p>
+        </div>
+
+    </div>
+    </div>
+
+</html> 
+
+
+

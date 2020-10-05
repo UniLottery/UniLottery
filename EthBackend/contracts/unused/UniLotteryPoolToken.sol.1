@@ -1,0 +1,123 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+pragma solidity 0.6.11;
+
+import "./ZeppelinERC20.sol";
+
+// Interface of the UniLottery Vote Token (ULVT).
+interface IUniLotteryVoteToken 
+{
+    function transferByULPT(
+            address sender, 
+            address recipient, 
+            uint256 amount)         external ;
+}
+
+
+/**
+ *  An ERC-20 token representing user's pro-rata share of UniLottery Pool.
+ *  Gets minted by the Main UniLottery Pool contract when user joins a pool,
+ *  and gets burned when user leaves a pool.
+ */
+contract UniLotteryPoolToken is ERC20 
+{
+    // ERC-20 constants
+    string public constant name = "UniLottery Pool Token";
+    string public constant symbol = "ULPT";
+    uint8  public constant decimals = 18;
+
+    // Holder count tracker.
+    uint    private numberOfHolders = 0;
+
+    // The Main UniLottery Pool contract address. 
+    // This contract controls the issuance and burns of tokens.
+    address private immutable poolAddress;
+
+    // The Voting Token (ULVT) contract address.
+    // Used when transfering tokens - as ULPT gets transfered, the 
+    // corresponding ULVT that holder holds are also getting transfered.
+    address private immutable votingToken;
+
+    // Pool-Only modifier to grant access to pool address only.
+    modifier poolOnly {
+        require( msg.sender == poolAddress );
+        _;
+    }
+
+
+    // Constructor. Here, we set the voting token, and pool addresses.
+    constructor( address _voteTokAddr ) public {
+        poolAddress = msg.sender;
+        votingToken = _voteTokAddr;
+    }
+
+    // Mint tokens for account. Used when a user joins a pool.
+    function mintTokensForAccount( 
+            address account, 
+            uint256 amount ) 
+                                                            external 
+                                                            poolOnly
+    {
+        require( account != address( 0 ) && amount > 0 );
+        if( balanceOf( account ) == 0 )
+            numberOfHolders++;
+
+        _mint( account, amount );
+    }
+
+    // Burn tokens from account. Used when a user withdraws from a pool.
+    function burnTokensFromAccount( 
+            address account, 
+            uint256 amount ) 
+                                                            external
+                                                            poolOnly
+    {
+        require( account != address( 0 ) && amount > 0 );
+        _burn( account, amount );
+
+        if( balanceOf( account ) == 0 && numberOfHolders > 0 )
+            numberOfHolders--;
+    }
+
+    // Get Holda Count.
+    function holderCount()      external view 
+    returns (uint) {
+        return numberOfHolders;
+    }
+
+    /** Override the transfer function.
+     *  Here, we must check if address also has some ULVT tokens, and
+     *  transfer them too, correspondingly.
+     *  Notice that voting token amount must be equal to pool share size.
+     */
+    function _transfer(
+            address sender, 
+            address recipient, 
+            uint256 amount) 
+                                            internal 
+                                            override
+    {
+        // Check the balances to compute final holder count.
+        if( amount > 0 ){
+            if( balanceOf( recipient ) == 0 )
+                numberOfHolders++;
+
+            if( balanceOf( sender ) == amount && numberOfHolders > 0 )
+                numberOfHolders--;
+        }
+
+        // Now, transfer corresponding ULVT's, if some exists.
+        uint256 vtBalance = ERC20( votingToken ).balanceOf( sender );
+        
+        if( vtBalance > 0 ){
+            require( vtBalance == balanceOf( sender ) );
+            IUniLotteryVoteToken( votingToken )
+                .transferByULPT( sender, recipient, amount );
+        }
+
+        super._transfer( sender, recipient, amount );
+    }
+}
+
+
+

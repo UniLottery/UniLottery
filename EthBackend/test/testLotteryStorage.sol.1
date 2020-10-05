@@ -1,0 +1,18 @@
+// Test is used to check amount of gas that's needed to run 
+// Winner Selection algorithm for up to 1000 token holders.
+
+pragma solidity = 0.6.11;
+
+import "../contracts/MinedUniswapLottery.sol";
+
+contract TestLotteryStorage
+{
+    function testWinnerCount()
+                                            external pure
+    {
+        LotteryStorage stor = new LotteryStorage();
+        stor.initialize();
+    }
+}
+
+

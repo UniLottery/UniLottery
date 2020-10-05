@@ -1,0 +1,216 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+pragma solidity 0.6.11;
+pragma experimental ABIEncoderV2;
+
+// We use the OpenZeppelin ERC-20 token implementation.
+import "./ZeppelinERC20.sol";
+
+// Use CoreSettings.
+import "./CoreSettings.sol";
+
+
+/**
+ *  Abstract Lottery contract, declaring an interface to basic lottery
+ *  functionality.
+ */
+abstract contract ILottery is ERC20, CoreUniLotterySettings
+{
+    // ======================   Events  ====================== //
+
+    // Emitted when pool transfers initial funds into fallback.
+    /*event InitialFundsTransfered(
+        address sender,
+        uint amount
+    );*/
+
+    // After initialize() function finishes.
+    event LotteryInitialized();
+
+    // Liquidity pair created on Uniswap with initial funds as market cap.
+    /*event UniswapLiquidityCreated(
+        address uniPairAddress,
+        uint ethAmount,
+        uint tokenAmount
+    );*/
+
+    // Emitted on lottery finish, when liquidity is pulled out in the end.
+    /*event UniswapLiquidityRemoved(
+        address uniPairAddress,
+        uint ethAmount,
+        uint tokenAmount
+    );*/
+
+    // Emitted when executing final function, after transferring 
+    // profits to their respective owners.
+    event LotteryEnd(
+        uint initialFunds,
+        uint poolProfits,
+        uint ownerProfits,
+        uint winnerProfits
+    );
+
+    // Emitted when on final finish, we call Randomness Provider
+    // to callback us with random value.
+    event RandomnessProviderCalled();
+
+    // Requirements for finishing stage start have been reached - 
+    // finishing stage has started.
+    event FinishingStageStarted();
+
+    // We were currently on the finishing stage, but some requirement
+    // is no longer met. We must stop the finishing stage.
+    event FinishingStageStopped();
+
+    // New Referral ID has been generated.
+    event ReferralIDGenerated(
+        address referrer,
+        uint256 id
+    );
+
+    // New referral has been registered with a valid referral ID.
+    event ReferralRegistered(
+        address referree,
+        address referrer,
+        uint256 id
+    );
+
+
+    // Standalone Mode events:
+    // User sold tokens to our contract, for ETH.
+    /*event SellTokens( 
+        address seller,
+        uint indexed tokenAmountSold,
+        uint indexed tokenAmountWeReceived,
+        uint indexed ethSellerReceived
+    );*/
+
+    // User bought tokens from our contract with ETH.
+    /*event BuyTokens( 
+        address buyer,
+        uint indexed tokenAmountBought,
+        uint indexed ethWeReceived
+    );*/
+
+
+    // ====================== State Variables ====================== //
+
+    // ERC-20 token constants.
+    string public name;
+    string public symbol;
+    uint256 immutable public decimals;
+
+
+    // ====================== Functions ====================== //
+
+    /**
+     *  Basic constructor.
+     *  @param config - ABI-encoded Lottery Config (different implementations
+     *      might use different config structures, which are ABI-decoded
+     *      inside the implementation).
+     *  @param _poolAddress - Address of the Main UniLottery Pool, which
+     *      provides initial funds, and receives it's profit share.
+     *  @param _randomProviderAddress - Address of a Randomness Provider,
+     *      to use for obtaining random seeds.
+     *  @param _storageAddress  - Address of a Lottery Storage.
+     *      Storage contract is a separate contract which holds all 
+     *      lottery token holder data, such as intermediate scores.
+     */
+    constructor( bytes memory config,
+                 address payable _poolAddress,
+                 address _randomProviderAddress,
+                 address _storageAddress )           public;
+
+
+    /** PAYABLE [ IN  ] <<<<<<<<<<<<<<<<<<<<<<<<<<<<
+     *  PAYABLE [ OUT ] >>>>>>>>>>>>>>>>>>>>>>>>>>>>
+     *
+     *  Initialization function.
+     *  Here, the most important startup operations are made - 
+     *  such as minting initial token supply and transfering it to
+     *  the Uniswap liquidity pair, in exchange for UNI-v2 tokens.
+     *
+     *  This function is called by the pool just after transfering
+     *  initial funds to this contract.
+     *
+     *  What's payable? 
+     *  - Pool transfers initial funds to this function.
+     *  - We transfer Ether to Uniswap liquidity pair when creating it.
+     */
+    function initialize()           external payable;
+
+    // Return this lottery's initial funds, as were specified in the config.
+    //
+    function getInitialFunds()          external view
+    returns( uint );
+
+    // Return active (still not returned to pool) initial fund value.
+    //
+    function getActiveInitialFunds()    external view
+    returns( uint );
+
+    /**
+     *  Get current Exchange's Token and ETH reserves.
+     *  If standalone mode, use our ETH and ULT token balances,
+     *  because we're the main exchange.
+     *  If uniswap mode, get reserves from Uniswap.
+     */
+    function getReserves() 
+                                                        external view
+    returns( uint _ethReserve, uint _tokenReserve );
+
+    /**
+     *  Get current ETH funds in lottery token exchange liquidity pool.
+     *  If we're using Uniswap, fetch data from Uniswap pair contract.
+     *  If we're on Standalone Mode, we're the exchange, so just
+     *  return our contract's ETH balance.
+     */
+    function getCurrentEthFunds()
+                                        public view
+    returns( uint );
+
+    /**
+     *  Callback function, which is called from Randomness Provider,
+     *  after it obtains a random seed to be passed to us, after
+     *  we have initiated The Ending Stage, on which random seed
+     *  is used to generate random factors for Winner Selection
+     *  algorithm.
+     *
+     *  This function executes both Ending Stages (Part One and Two),
+     *  and completes this lottery.
+     */ 
+    function finish_randomnessProviderCallback(
+            uint256 randomSeed,
+            uint256 callID )                        external;
+
+
+    /**
+     *  Alternative approach to Lottery Ending - is used only when
+     *  Randomness Provider doesn't work, and doesn't call the
+     *  above callback.
+     *
+     *  This alternative approach can be initiated by any external
+     *  actor, by calling this function when specified conditions
+     *  are met:
+     *  - Lottery is inactive (isActive == false),
+     *  - Lottery is Not Completed Yet (lotteryCompleted == false),
+     *  - We're on the Ending Stage (onEndingStage == true),
+     *  - Request to Randomness Provider was made at least 6 hours ago,
+     *    and the randomness provider callback hasn't been called yet.
+     *
+     *  If these conditions are met, we can initiate the Alternative
+     *  Ending, which performs basically the same operations
+     */
+    function finish_AlternativeEndingApproach()     external;
+
+    /**
+     *  Return this lottery's config, using ABIEncoderV2.
+     */
+    function getLotteryConfig()
+                                                    external view
+    returns( LotteryConfig memory ourConfig );
+
+}
+
+
+

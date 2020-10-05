@@ -1,0 +1,158 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+pragma solidity 0.6.11;
+
+import "./ZeppelinERC20.sol";
+
+
+/**
+ *  An ERC-20 token representing user's right to vote on changes and actions of
+ *  UniLottery Pool, for example, initiate a new lottery, or vote for new config.
+ *  Gets minted by the Main UniLottery Pool contract when user requests voting 
+ *  rights, and gets burned when user withdraws his voting rights.
+ *  Voting rights can be requested only if a user owns some ULPT tokens -
+ *  if user has a share in a pool.
+ *  Minimum share percentage is adjustable via voting. In the beginning, it's 1%.
+ *
+ *  This token cannot be traded or transfered by users. It's tied to the 
+ *  corresponding ULPT tokens that user address owns - so if user transfers
+ *  his ULPT tokens, this token is automatically transfered to new address too,
+ *  the transfer being initiated by the ULPT contract.
+ */
+contract UniLotteryVoteToken is ERC20 
+{
+    // ERC-20 constants
+    string public constant name = "UniLottery Voting Token";
+    string public constant symbol = "ULVT";
+    uint8  public constant decimals = 18;
+
+    // Tracker of the holder count.
+    uint    private numberOfHolders = 0;
+
+    // The Main UniLottery Pool contract address. 
+    // This contract controls the issuance and burns of tokens.
+    address private immutable poolAddress;
+
+    // The ULPT (pool share token) address.
+    // This token contract controls the transfers of voting tokens.
+    // Transfers cannot be initiated by any other address.
+    address private ULPTaddress;
+
+    // poolOnly modifier to grant access to pool address only.
+    modifier poolOnly {
+        require( msg.sender == poolAddress );
+        _;
+    }
+    
+    // ULPTonly modifier to grant access to ULPT contract address only.
+    modifier ULPTonly {
+        require( msg.sender == ULPTaddress );
+        _;
+    }
+
+    // Constructor. Here, we set the pool address and ULPT adrress.
+    // Gets called by the main pool contract.
+    constructor() public {
+        poolAddress = msg.sender;
+    }
+
+    // Set the ULPT token contract address, which is the only one who can
+    // initiate transfers of this token.
+    // Must be called by the Pool just after the constructor.
+    function setULPTaddress( address _ulptAddress )
+                                                        external 
+                                                        poolOnly
+    {
+        ULPTaddress = _ulptAddress;
+    }
+
+    // Mint tokens for account. Used when a user acquires vote rights.
+    function mintTokensForAccount( 
+                address account, 
+                uint256 amount ) 
+                                                        external 
+                                                        poolOnly
+    {
+        require( account != address( 0 ) && amount > 0 );
+        if( balanceOf( account ) == 0 )
+            numberOfHolders++;
+
+        _mint( account, amount );
+    }
+    
+    // Burn tokens from account. Used when a user forfeits vote rights.
+    function burnTokensFromAccount( 
+                address account, 
+                uint256 amount ) 
+                                                        external
+                                                        poolOnly
+    {
+        require( account != address( 0 ) && amount > 0 );
+        _burn( account, amount );
+
+        if( balanceOf( account ) == 0 && numberOfHolders > 0 )
+            numberOfHolders--;
+    }
+
+    // Get Holda Count.
+    function holderCount() external view 
+    returns (uint) {
+        return numberOfHolders;
+    }
+
+    // Override the approve(), transfer(), and transferFrom() functions,
+    // as the users won't be able to use them - only the ULPT contract will be
+    // able to use them. Approve() won't be used at all.
+    // In OpenZeppelin, they are implemented as _transfer() and _approve().
+
+    function _transfer(
+            address sender, 
+            address recipient,
+            uint256 amount)
+                                                    internal 
+                                                    override
+    {
+        require( msg.sender == ULPTaddress, 
+                 "Transfers can only be initiated by the ULPT contract!" );
+
+        // Check the balances to compute final holder count.
+        if( amount > 0 ){
+            if( balanceOf( recipient ) == 0 )
+                numberOfHolders++;
+
+            if( balanceOf( sender ) == amount && numberOfHolders > 0 )
+                numberOfHolders--;
+        }
+
+        super._transfer( sender, recipient, amount );
+    }
+
+    // No approvals can be allowed on this token.
+    function _approve(
+            address /*owner*/, 
+            address /*spender*/, 
+            uint256 /*amount*/ ) 
+                                            internal 
+                                            override
+    {
+        require( false, "Token doesn't support approvals." );
+    }
+
+    // The ULPT token can issue ULVT transfers only when ULPT gets
+    // transfered. This is accomplished by a dedicated function which
+    // can be used only by the ULPT contract.
+    //
+    function transferByULPT(
+            address sender, 
+            address recipient, 
+            uint256 amount)
+                                                    external 
+                                                    ULPTonly
+    {
+        _transfer( sender, recipient, amount );
+    }
+
+}
+
+
+

@@ -1,0 +1,1868 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+pragma solidity 0.6.11;
+pragma experimental ABIEncoderV2;
+
+// Import the OpenZeppelin ERC20 functionality just for the SafeMath library.
+// We're not implementing any ERC20 tokens in this file.
+import "./ZeppelinERC20.sol";
+
+// Import our UniLottery ecosystem tokens, to be used in this contract.
+import "./UniLotteryPoolToken.sol";
+import "./UniLotteryVoteToken.sol";
+
+// Import the Core UniLottery Settings, where core global constants
+// are defined.
+import "./CoreSettings.sol";
+
+// The Lottery Token implementation, where all lottery player
+// interactions happen.
+import "./Lottery.sol";
+
+// Randomness provider, using Provable oracle service inside.
+// We instantiate this provider only once here, and later, every
+// lottery can use the provider services.
+import "./RandomProvider.sol";
+
+// Use a Lottery Factory to create new lotteries, without using
+// "new" statements to deploy lotteries in the Pool, because that
+// pattern makes the Pool's code size exdeed the 24 kB limit.
+import "./LotteryFactory.sol";
+
+
+/**
+ *  UniLotteryPool version v0.1
+ *
+ *  This is the main UniLottery Pool DAO contract, which governs all 
+ *  pool and lottery operations, and holds all poolholder funds.
+ *  
+ *  This contract uses ULPT and ULVT tokens to track users share of 
+ *  the pool and their voting rights.
+ *
+ *  This contract is responsible for launching new lotteries, 
+ *  managing profits, and managing user fund contributions.
+ *
+ *  By looking at the code, one should notice that many features are
+ *  declared, but not implemented -- such as different vote types, and
+ *  never-used, but declared events.
+ *
+ *  This is because the project is in early stage, and current version
+ *  is by no means finalized. The declared features will be implemented
+ *  or decided not to be implemented later, after testing the concept
+ *  with the initial version at first.
+ *
+ *  This version (v0.1) allows only basic pool functionality, targeted 
+ *  mostly to the only-one-poolholder model, because most likely 
+ *  only Owner is going to use this pool version.
+ *
+ *  =================================================
+ *
+ *  Who can transfer money to/from the pool?
+ *
+ *  There are 2 actors which could initiate money transfers:
+ *  1. Pool shareholders - by providing/removing liquidity in
+ *      exchange for ULPT.
+ *  2. Lottery contracts - on start, pool provides them initial funds,
+ *      and on finish, lottery returns initial funds + profits
+ *      back to the pool.
+ *
+ *  -------------------------------------------------
+ *
+ *  In which functions the money transfers occur?
+ *
+ *  There are 4 functions which might transfer money to/from the pool:
+ *
+ *  1. [IN] The fallback payable() function. 
+ *      Used by the finished lotteries to transfer initial funds 
+ *      and profits back to the pool.
+ *
+ *  2. [IN] provideLiquidity() function. 
+ *      Is called by users to provide ETH into the pool in exchange
+ *      for ULPT pool share tokens - user become pool shareholders.
+ *
+ *  3. [OUT] removeLiquidity() function.
+ *      Is called by users when they want to remove their liquidity
+ *      share from the pool. ETH gets transfered from pool to 
+ *      callers wallet, and corresponding ULPT get burned.
+ *
+ *  4. [OUT] launchLottery() function.
+ *      This function deploys a new lottery contract, and transfers
+ *      its initial funds from pool balance to the newly deployed 
+ *      lottery contract.
+ *      Note that lotteries can't finish with negative profits, so
+ *      every lottery must return its initial profits back to the
+ *      pool on finishing.
+ */
+contract UniLotteryPool is CoreUniLotterySettings
+{
+    using SafeMath for uint256;
+
+    // =========   Enums   ========= //
+
+    enum VoteType {
+        PROPOSE_LOTTERY_CONFIG,
+        VOTE_LOTTERY_CONFIG,
+        PROPOSE_AVERAGE_LOTTERY_CONFIG,
+
+        SET_RUN_MODE,
+        CHANGE_ACTIVE_STATUS,
+        CHANGE_MAXIMUM_LIQUIDITY_PER_LOTTERY,
+        CHANGE_MINIMUM_POOL_RESERVE_PERCENTAGE,
+        CHANGE_MINIMUM_POOL_SHARE_REQUIRED_FOR_VOTING,
+        CHANGE_MAX_NUMBER_OF_LOTTERIES,
+
+        CHANGE_VOTE_REQUIREMENT_LOTTERY_START,
+        CHANGE_VOTE_REQUIREMENT_RUN_MODE,
+        CHANGE_VOTE_REQUIREMENT_LIQUIDITY,
+        CHANGE_VOTE_REQUIREMENT_ACTIVE_STATUS
+    }
+
+    enum LotteryType {
+        UniswapLottery,
+        StandaloneLottery
+    }
+
+    enum LotteryRunMode {
+        MANUAL,
+        AUTO,
+        MANUAL_AVERAGE_CONFIG,
+        AUTO_AVERAGE_CONFIG
+    }
+
+    enum VoteRequirementType {
+        LotteryStart,
+        RunMode,
+        Liquidity,
+        ActiveStatusChange
+    }
+
+    // Struct for defining a "voting action" executor
+    // (specific callback for specific vote type).
+    // TODO: To be implemented in future versions, as part of
+    //       specific "Votable" template-contract library.
+    /*struct VotingActionExecutor {
+        VoteType voteType;
+        function (uint256 voteData) internal returns (bool) voteClbk;
+        function (bytes proposedData) internal returns (bool) proposeClbk;
+    }*/
+
+    // ====== Event definitions ====== //
+
+    // Periodic stats event.
+    event PoolStats(
+        uint32 poolHolderCount,
+        uint32 voterCount,
+        uint32 indexed lotteriesPerformed,
+        uint indexed totalPoolFunds,
+        uint indexed currentPoolBalance
+    );
+
+    // New poolholder joins and complete withdraws of a poolholder.
+    event NewPoolholderJoin(
+        address indexed poolholder,
+        uint256 initialAmount
+    );
+
+    event PoolholderWithdraw(
+        address indexed poolholder
+    );
+
+    // Current poolholder liquidity adds/removes.
+    event AddedLiquidity(
+        address indexed poolholder,
+        uint256 indexed amount
+    );
+
+    event RemovedLiquidity(
+        address indexed poolholder,
+        uint256 indexed amount
+    );
+
+    // Fallback function called - somebody paid for something.
+    event FallbackCalledWithValue(
+        address indexed sender,
+        uint256 indexed value
+    );
+
+    // Current poolholder voting rights grants/forfeits.
+    event VotingRightsGranted(
+        address indexed poolholder,
+        uint256 indexed amount
+    );
+
+    event VotingRightsForfeited(
+        address indexed poolholder,
+        uint256 indexed amount
+    );
+
+    // Lottery Run Mode change (for example, from Manual to Auto lottery).
+    event LotteryRunModeChanged(
+        LotteryRunMode previousMode,
+        LotteryRunMode newMode
+    );
+
+    // Maximum single-lottery liquidity amount change.
+    event MaximumLiquidityPerLotteryChanged(
+        uint256 oldValue,
+        uint256 newValue
+    );
+
+    // Minimum pool reserve requirement percentage change.
+    event MinimumPoolReserveRequirementChanged(
+        uint256 oldValue,
+        uint256 newValue
+    );
+
+    // Maximum number of ongoing lotteries changed.
+    event MaxNumberOfLotteriesChanged(
+        uint256 oldValue,
+        uint256 newValue
+    );
+
+    // Pool activated or disabled (isPoolActive (activity status) changed).
+    event PoolDisabled();
+    event PoolActivated();
+
+    // Lottery configs proposed. In other words, it's a new lottery start 
+    // initiation. If no config specified, then the default config for 
+    // that lottery is used.
+    event NewConfigProposed(
+        address indexed initiator,
+        Lottery.LotteryConfig cfg,
+        uint configIndex
+    );
+
+    // Voting for something (determined by vote type and data).
+    // Vote types are constants, defined in enum above.
+    event Vote(
+        address indexed voter,
+        VoteType indexed voteType,
+        uint256 voteData
+    );
+
+    // Lottery started.
+    event LotteryStarted(
+        address indexed lottery,
+        uint256 indexed fundsUsed,
+        uint256 indexed poolPercentageUsed
+    );
+
+    // Lottery finished.
+    event LotteryFinished(
+        address indexed lottery,
+        uint256 indexed totalReturn,
+        uint256 indexed profitAmount
+    );
+
+    // Vote Requirement changed.
+    event VoteRequirementChanged(
+        VoteRequirementType vrType,
+        uint256 oldValue,
+        uint256 newValue
+    );
+
+    // Minimum pool share percentage required for voting, has changed.
+    event MinimumPoolShareRequiredForVotingChanged(
+        uint256 oldValue,
+        uint256 newValue
+    );
+    
+
+    // ========= Constants ========= //
+
+    // The Core Constants (OWNER_ADDRESS, Owner's max profit amount),
+    // and also the percentage calculation-related constants,
+    // are defined in the CoreUniLotterySettings contract, which this
+    // contract inherits from.
+
+    // Other constants.
+    // Minimum pooled amount required to start lotteries.
+    uint256 public constant MIN_POOL_AMOUNT = 1 ether;
+
+    // Minimum deposit amount (currently zero - you can pool any amount).
+    uint256 public constant MIN_DEPOSIT = 0;
+
+    // Absolute voting requirement, required to change global voting
+    // requirements (to change requirement for run mode change, or
+    // liquidity requirement change).
+    //uint256 public constant ABSOLUTE_VOTE_REQUIREMENT = 95 * PERCENT;
+
+
+    // ========= State variables ========= //
+
+    // The following variables are commented-out, because they are
+    // not used in the current version of the pool - because current
+    // version does not support voting yet.
+
+    /*
+    // Individual-setting vote requirements.
+    // Can be changed by voting, but at least ABSOLUTE_VOTE_REQUIREMENT
+    // amount of voters must vote.
+    uint256 public voteRequirement_LotteryStart = 50 * PERCENT;
+    uint256 public voteRequirement_RunMode      = 60 * PERCENT;
+    uint256 public voteRequirement_Liquidity    = 70 * PERCENT;
+    uint256 public voteRequirement_ChangeActiveStatus  = 80 * PERCENT;
+
+    // Pool Liquidity requirements.
+    uint256 public minimumPoolReservePercentage = 5  * PERCENT;
+    uint256 public maximumFundAmountPerLottery  = 95 * PERCENT;
+
+    // Minimum share percentage required for voting.
+    uint256 public minimumPoolSharesRequiredForVoting = 1 * PERCENT;
+
+    // Max-number of lottery config voting candidates.
+    uint256 public maxLotteryConfigVoteCandidates = 5;
+
+    // Currently set Owner's Profit Share & Owner's Lottery Fee
+    // for further lotteries.
+    uint public ownerProfitShare = 10 * PERCENT;
+    uint public ownerLotteryFee = 50 * BASIS_POINT;
+    */
+
+    // Max-number of currently ongoing lotteries.
+    uint public maxNumberOfOngoingLotteries = 3;
+
+    // If running Auto-Mode run mode, minimum amount of time to wait
+    // before launching next lottery when last auto-lottery finished.
+    uint public minAutoModeLotteryDelay = 1 days;
+
+    // Re-Entrancy Locks for Lottery Launch function, and for
+    // Liquidity Provide/Remove functions.
+    bool lotteryLaunchOngoing = false;
+    bool liquidityOperationOngoing = false;
+
+    // Is pool currently active (accepting new users, starting new 
+    // lotteries, etc.). More - above, in OWNER_ADDRESS description.
+    bool public isPoolActive = false;
+
+    // Is Voting allowed currently?
+    // It's in Beta-Phase, so by default, it's not allowed, but 
+    // Owner can change it.
+    bool public isVotingAllowed = false;
+
+    // Tracker for the last-known pool balance (the balance before 
+    // someone pays through fallback function).
+    // Used to track lottery fund & profit returns on finish.
+    uint currentPoolBalance = 0;
+
+    // The debt to the Randomness Provider.
+    // Incurred when we allow the Randomness Provider to execute
+    // requests with higher price than we have given it funds for.
+    // (of course, executed only when the Provider has enough balance
+    // to execute it).
+    // Paid back on next Randomness Provider request.
+    uint randomnessProviderDebt = 0;
+    
+    // Auto-Mode lottery parameters:
+    uint public autoMode_nextLotteryDelay  = 1 days;
+    uint public autoMode_maxNumberOfRuns   = 50;
+
+    // Is an Auto-Mode lottery currently ongoing?
+    bool public autoMode_isLotteryCurrentlyOngoing = false;
+
+    // When the last Auto-Mode lottery was started.
+    uint public autoMode_lastLotteryStarted;
+
+    // When the last Auto-Mode lottery has finished.
+    // Used to compute the time until the next lottery.
+    uint public autoMode_lastLotteryFinished;
+
+    // Auto-Mode callback scheduled time.
+    uint public autoMode_timeCallbackScheduled;
+
+    // Iterations of current Auto-Lottery cycle.
+    uint autoMode_currentCycleIterations = 0;
+
+
+    // Most recently launched lottery.
+    Lottery public mostRecentLottery;
+
+    // Stores all lotteries that have been performed 
+    // (including currently ongoing ones ).
+    Lottery[] public allLotteriesPerformed;
+
+    // Currently ongoing lotteries - a list, and a mapping.
+    mapping( address => bool ) ongoingLotteries;
+    Lottery[] public ongoingLotteryList;
+
+    /* Lottery running mode (Auto-Lottery, or manual lottery).
+     *
+     * If Auto-Lottery feature is enabled, the new lotteries will start
+     * automatically after the previous one finished, and will use
+     * the default, agreed-upon config, which is set by voting.
+     *
+     * If Manual Lottery is enabled, the new lotteries are started
+     * manually, by submitting and voting for a specific config.
+     * The lottery starts when specified percentage of users 
+     * vote for specific config.
+     *
+     * Both modes can have AVERAGE_CONFIG feature, when final lottery
+     * config is not set by voting for one of several user-submitted 
+     * configs, but final config is computed by averaging all the voted
+     * configs, where each vote proposes a config.
+     */
+    LotteryRunMode public lotteryRunMode = LotteryRunMode.MANUAL;
+
+    // The following variables are commented out: voting not supported yet.
+    /*
+    // All-mode-compatible Lottery Config Voting structure. 
+    struct VotedLotteryConfig {
+        bool active;
+        uint voteCount;
+        uint submissionDate;
+        Lottery.LotteryConfig config;
+    }
+
+    // Regular (Non-Average) mode runtime voting data.
+    VotedLotteryConfig[] internal regularModeLotteryConfigs;
+
+    // Average mode runtime voting data,
+    VotedLotteryConfig averageModeLotteryConfig;
+
+    // Agreed-upon AUTO-MODE lottery config.
+    VotedLotteryConfig autoModeLotteryConfig;
+    */
+
+    // Owner-approved addresses, which can call functions, marked with
+    // modifier "ownerApprovedAddressOnly", on behalf of the Owner,
+    // to initiate Owner-Only operations, such as setting next lottery
+    // config, or moving specified part of Owner's liquidity pool share to
+    // Owner's wallet address.
+    // Note that this is equivalent of as if Owner had called the
+    // removeLiquidity() function from OWNER_ADDRESS.
+    //
+    // These owner-approved addresses, able to call owner-only functions,
+    // are used by Owner, to minimize risk of a hack in these ways:
+    // - OWNER_ADDRESS wallet, which might hold significant ETH amounts,
+    //   is used minimally, to have as little log-on risk in Metamask,
+    //   as possible.
+    // - The approved addresses can have very little Ether, so little
+    //   risk of using them from Metamask.
+    // - Periodic liquidity removes from the Pool can help to reduce
+    //   losses, if Pool contract was hacked (which most likely
+    //   wouldn't ever happen given our security measures, but 
+    //   better be safe than sorry).
+    //
+    mapping( address => bool ) public ownerApprovedAddresses;
+
+    // Owner-Only settable next lottery config, to be used on 
+    // beta versions only, when only Owner is using the pool.
+    Lottery.LotteryConfig internal nextLotteryConfig;
+
+    // Last-started lottery's config.
+    Lottery.LotteryConfig internal lastLotteryConfig;
+
+
+    // IMMUTABLES:
+    // The addresses of pool management tokens - 
+    // the Vote Token (ULVT), and the Pool Share Token (ULPT).
+    UniLotteryVoteToken immutable public voteToken;
+    UniLotteryPoolToken immutable public poolShareToken;
+
+    // Randomness Provider address.
+    UniLotteryRandomnessProvider immutable public randomnessProvider;
+
+    // The Lottery Factory that we're using to deploy NEW lotteries.
+    UniLotteryLotteryFactory immutable public lotteryFactory;
+
+    // Lottery Config Generator contract address.
+    UniLotteryConfigGenerator immutable public lotteryConfigGenerator;
+
+
+    // ========= FUNCTIONS - METHODS ========= //
+
+    // =========  Private Functions  ========= //
+
+    /**
+     *  Modifier for checking if contract can be actively managed --
+     *  that is, if contract currently "is active", or if
+     *  msg.sender is OWNER_ADDRESS, who can actively manage contract
+     *  anytime.
+     */
+    modifier activelyManaged {
+        require( isPoolActive || (msg.sender == OWNER_ADDRESS),
+                 "Contract can't be actively managed by external actors!" );
+        _;
+    }
+
+    // Modifier for checking if Voting Mode is enabled.
+    modifier votingModeOnly {
+        require( isVotingAllowed, "Voting is not allowed currently!" );
+        _;
+    }
+
+    // Modifier for checking if Voting Mode is DISABLED.
+    modifier votingDisabledOnly {
+        require( !isVotingAllowed, "Voting must be disabled!" );
+        _;
+    }
+
+
+    // Owner-Only modifier (standard).
+    modifier ownerOnly {
+        require( msg.sender == OWNER_ADDRESS, "Function is Owner-Only!" );
+        _;
+    }
+
+    // Owner, or Owner-Approved address only.
+    modifier ownerApprovedAddressOnly {
+        require( ownerApprovedAddresses[ msg.sender ],
+                 "Function can be called only by Owner-Approved addresses!");
+        _;
+    }
+
+    // Randomness Provider-Only modifier.
+    modifier randomnessProviderOnly {
+        require( msg.sender == address( randomnessProvider ),
+                 "Function can be called only by the Randomness Provider!" );
+        _;
+    }
+
+    /**
+     *  Modifier for checking if a caller is a currently ongoing
+     *  lottery - that is, if msg.sender is one of addresses in
+     *  ongoingLotteryList array, and present in ongoingLotteries.
+     */
+    modifier calledByOngoingLotteryOnly {
+        require( ongoingLotteries[ msg.sender ],
+                 "Function can be called only by ongoing lotteries!");
+        _;
+    }
+
+    /**
+     *  Modifier for voting functions, to check if caller has
+     *  the required amount of voting rights to vote on that function.
+     */ 
+    /*modifier callerHasBasicVotingRights {
+        require( getVotingRightAmount( msg.sender ) != 0,
+                 "Caller doesn't meet requirements for voting!" );
+        _;
+    }*/
+    
+    // Modifier version with custom voting right percentage.
+    /*modifier callerHasVotingRights( uint requiredPercentage ) {
+        uint ulvtPercentage = 
+            ( (100*PERCENT) * getVotingRightAmount( msg.sender ) ) /
+            voteToken.totalSupply();
+
+        require( ulvtPercentage >= requiredPercentage, 
+                 "Caller doesn't meet requirements for voting!" );
+        _;
+    }*/
+
+
+    // Emits a statistical event, summarizing current pool state.
+    function emitPoolStats() 
+                                                private 
+    {
+        (uint32 a, uint32 b, uint32 c, uint d, uint e) = getPoolStats();
+        emit PoolStats( a, b, c, d, e );
+    }
+
+    // Helper function for getting a convenient representation of
+    // vote percentage ( amount / ulvtTotalSupply ) * 100%
+    function getVotePercentage( uint256 amount )
+                                                            private view
+    returns( uint256 percentage )
+    {
+        return ( (100 * PERCENT) * amount ) / voteToken.totalSupply();
+    }
+
+
+    /** PAYABLE [ OUT ] >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+     *
+     *  Launch a new UniLottery Lottery, from specified Lottery Config.
+     *  Perform all initialization procedures, including initial fund
+     *  transfer, and random provider registration.
+     *
+     *  @return newlyLaunchedLottery - the Contract instance (address) of 
+     *      the newly deployed and initialized lottery.
+     */ 
+    function launchLottery( Lottery.LotteryConfig memory cfg ) 
+                                                            private
+    returns( Lottery newlyLaunchedLottery )
+    {
+        // Check & Lock the Re-Entrancy Lock.
+        require( !lotteryLaunchOngoing, "Lottery launch is ongoing!" );
+        lotteryLaunchOngoing = true;
+
+        // Check config fund requirement.
+        // Lottery will need funds equal to: 
+        // initial funds + gas required for randomness prov. callback,
+        // which is made up of 2 parts: base gas, and per-holder gas,
+        // because ending algorithm operates a loop.
+        //
+        // Also, we must take into account that more holders could join
+        // during the finishing stage, so let's add holderCount / 50.
+        // Also, we perform QuickSort on winner score array, and
+        // that also takes computation resources, however much lower
+        // than per-holder score computing, so let's just add
+        // number of winners to ther per-holder gas count.
+
+        uint endCallbackGas = 
+                LOTTERY_END_CALLBACK_BASE_GAS +
+                ( LOTTERY_END_CALLBACK_PER_HOLDER_GAS * 
+                  ( cfg.finishCriteria_minNumberOfHolders +
+                    (cfg.finishCriteria_minNumberOfHolders / 50) +
+                    (cfg.winnerProfitShares.length * 2)
+                  ) );
+
+        // Now, get the price of the random datasource query with
+        // the above amount of callback gas, from randomness provider.
+        uint callbackPrice = randomnessProvider
+            .getPriceForRandomnessCallback( endCallbackGas );
+
+        // Also take into account the debt that we might owe to the
+        // Randomness Provider, if it previously executed requests
+        // with price being higher than we have gave it funds for.
+        //
+        // This situation can occur because we transfer lottery callback
+        // price funds before lottery starts, and when that lottery
+        // finishes (which can happen after several weeks), then
+        // the gas price might be higher than we have estimated
+        // and given funds for on lottery start.
+        // In this scenario, Randomness Provider would execute the 
+        // request nonetheless, provided that it has enough funds in 
+        // it's balance, to execute it.
+        //
+        // However, the Randomness Provider would notify us, that a
+        // debt of X ethers have been incurred, so we would have
+        // to transfer that debt's amount with next request's funds
+        // to Randomness Provider - and that's precisely what we
+        // are doing here, now:
+
+        // Compute total cost of this lottery - initial funds,
+        // Randomness Provider callback cost, and debt from previous
+        // callback executions.
+
+        uint totalCost = cfg.initialFunds + callbackPrice +
+                         randomnessProviderDebt;
+
+        // Check if our balance is enough to pay the cost.
+        // TODO: Implement more robust checks on minimum and maximum 
+        //       allowed fund restrictions.
+        require( totalCost <= address( this ).balance,
+                 "Insufficient funds for this lottery start!" );
+
+        // Set the pool-settable internal config properties.
+        // Profit share and fee are now set in the config, not here.
+        //cfg.ownerProfitShare = ownerProfitShare;
+        //cfg.ownerLotteryFee = ownerLotteryFee;
+
+        cfg.randomnessProvider = address( randomnessProvider );
+
+        // Deploy the new lottery contract, send initial funds to
+        // the fallback payable function of the contract, and
+        // start the active initialization.
+        Lottery lottery = lotteryFactory.createNewLottery( cfg );
+
+        // Check if the lottery's pool address and owner address
+        // are valid (same as ours).
+        require( lottery.poolAddress == address( this ) &&
+                 lottery.OWNER_ADDRESS == OWNER_ADDRESS,
+                 "Lottery's pool or owner addresses are invalid!" );
+
+        // Transfer lottery initial funds.
+        address( lottery ).transfer( cfg.initialFunds );
+
+        // Transfer the Gas required for lottery end callback, and the
+        // debt (if some exists), into the Randomness Provider.
+        address( randomnessProvider ).transfer( 
+                    callbackPrice + randomnessProviderDebt );
+
+        // Clear the debt (if some existed) - it has been paid.
+        randomnessProviderDebt = 0;
+
+        // Update current pool balance tracker.
+        currentPoolBalance = address( this ).balance;
+
+        // Notify the Randomness Provider about how much gas will be 
+        // needed to run this lottery's ending callback, and how much
+        // funds we have given for it.
+        randomnessProvider.setLotteryCallbackGas( 
+                address( lottery ), 
+                endCallbackGas, 
+                callbackPrice 
+        );
+
+        // Initialize the lottery - start the active lottery stage!
+        lottery.initialize();
+
+
+        // Lottery was successfully initialized!
+        // Now, add it to tracking arrays, and emit events.
+        ongoingLotteries[ address(lottery) ] = true;
+        ongoingLotteryList.push( lottery );
+        allLotteriesPerformed.push( lottery );
+
+        // Set is as the Most Recently Launched Lottery.
+        mostRecentLottery = lottery;
+
+        // Set the last-launched lottery's config as this config.
+        lastLotteryConfig = cfg;
+
+        // Emit the apppproppppriate evenc.
+        emit LotteryStarted( address( lottery ), cfg.initialFunds,
+            ( (100 * PERCENT) * totalCost ) / totalPoolFunds() );
+
+        // Un-Lock the Re-Entrancy Lock.
+        lotteryLaunchOngoing = false;
+
+        // Return the newly-successfully-started lottery.
+        return lottery;
+    }
+
+
+    /**
+     *  Start a New Lottery, from config voted in regular mode.
+     *  Firstly, function checks the configs for max amount of votes,
+     *  then selects the highest amount, and clears the candidate array -
+     *  thus ending the current voting and executing end action -
+     *  starting a lottery with the winning config.
+     */ 
+    /*function startLotteryRegularMode()
+                                            private 
+    {
+        require( ongoingLotteryList.length < 
+                 maxNumberOfOngoingLotteries,
+                 "Max number of ongoing lotteries already reached!" );
+
+        // Loop through the candidates and find the one with highest
+        // vote count, and execute it.
+        uint16 maxInd = 0;
+        uint maxVal = 0;
+        for( uint16 i = 0; i < regularModeLotteryConfigs.length; i++ ) {
+            if( regularModeLotteryConfigs[i].voteCount > maxVal ) {
+                maxVal = regularModeLotteryConfigs[i].voteCount;
+                maxInd = i;
+            }
+        }
+
+        // Check if it meets the vote and fund requirements.
+        require( getVotePercentage( maxVal ) >= voteRequirement_LotteryStart,
+                 "Vote requirement for lottery start wasn't met!" );
+
+        // Launch it!
+        launchLottery( regularModeLotteryConfigs[ maxInd ].config );
+    }*/
+
+
+    /**
+     *  When AUTO run-mode is set, this function schedules a new lottery 
+     *  to be started after the last Auto-Mode lottery has ended, after
+     *  a specific time delay (by default, 1 day delay).
+     *
+     *  Also, it's used to bootstrap the Auto-Mode loop - because
+     *  it schedules a callback to get called.
+     *
+     *  This function is called in 2 occasions:
+     *
+     *  1. When lotteryFinish() detects an AUTO run-mode, and so, a
+     *      new Auto-Mode iteration needs to be performed.
+     *
+     *  2. When external actor bootstraps a new Auto-Mode cycle.
+     *
+     *  Notice, that this function doesn't use require()'s - that's
+     *  because it's getting called from lotteryFinish() too, and
+     *  we don't want that function to fail just because some user
+     *  set run mode to other value than AUTO during the time before.
+     *  The only require() is when we check for re-entrancy.
+     *
+     *  How Auto-Mode works?
+     *  Everything is based on the Randomness Provider scheduled callback
+     *  functionality, which is in turn based on Provable services.
+     *  Basically, here we just schedule a scheduledCallback() to 
+     *  get called after a specified amount of time, and the
+     *  scheduledCallback() performs the new lottery launch from the
+     *  current next-lottery config.
+     */
+    function scheduleAutoModeCallback()
+                                            private
+    returns( bool success )
+    {
+        // Lock & Load the Lottery Launch Lock!
+        // Require() here, because we want to terminate the transaction
+        // if malicious actor incurred re-entrancy somehow.
+        require( !lotteryLaunchOngoing, "Re-entrant call detected!" );
+        lotteryLaunchOngoing = true;
+
+        // Firstly, check if mode is AUTO.
+        if( lotteryRunMode != LotteryRunMode.AUTO ) {
+            autoMode_currentCycleIterations = 0;
+            lotteryLaunchOngoing = false;
+            return false;
+        }
+
+        // Check if valid AutoMode params were specified.
+        if( autoMode_nextLotteryDelay < minAutoModeLotteryDelay ) {
+            autoMode_currentCycleIterations = 0;
+            lotteryLaunchOngoing = false;
+            return false;
+        }
+
+        // Start a scheduled callback using the Randomness Provider
+        // service! But first, we gotta transfer the needed funds
+        // to the Provider.
+
+        // Get the price.
+        uint callbackPrice = randomnessProvider
+            .getPriceForScheduledCallback( AUTO_MODE_SCHEDULED_CALLBACK_GAS );
+
+        // Add the debt, if exists.
+        uint totalPrice = callbackPrice + randomnessProviderDebt;
+        
+        if( totalPrice > address(this).balance ) {
+            lotteryLaunchOngoing = false;
+            return false;
+        }
+
+        // Send the required funds to the Rand.Provider.
+        // Use the send() function, because it returns false upon failure,
+        // and doesn't revert this transaction.
+        if( ! address( randomnessProvider ).send( totalPrice ) )
+        {
+            lotteryLaunchOngoing = false;
+            return false;
+        }
+
+        // Now, we've just paid the debt (if some existed).
+        randomnessProviderDebt = 0;
+
+        // Now, call the scheduling function of the Randomness Provider!
+        randomnessProvider.schedulePoolCallback(
+            autoMode_nextLotteryDelay,
+            AUTO_MODE_SCHEDULED_CALLBACK_GAS,
+            callbackPrice
+        );
+
+        // Set the time the callback was scheduled.
+        autoMode_timeCallbackScheduled = now;
+
+        // Unlock re-entrancy lock, and return success!
+        lotteryLaunchOngoing = false;
+        return true;
+    }
+
+
+    // ========= Public Functions ========= //
+
+    /**
+     *  Constructor.
+     *  - Here, we deploy the ULPT and ULVT token contracts.
+     *  - Also, we deploy the Provable-powered Randomness Provider
+     *    contract, which lotteries will use to get random seed.
+     *  - We assign our Lottery Factory contract address to the passed
+     *    parameter - the Lottery Factory contract which was deployed
+     *    before, but not yet initialize()'d.
+     *
+     *  Notice, that the msg.sender (the address who deployed the pool
+     *  contract), doesn't play any special role in this nor any related
+     *  contracts.
+     */
+    constructor( address _lotteryFactoryAddr,
+                 address _storageFactoryAddr ) 
+                                                        public
+    {
+        // Deploy & setup the ULVT and ULPT tokens.
+        UniLotteryVoteToken _voteToken = new UniLotteryVoteToken();
+        UniLotteryPoolToken _poolToken = 
+            new UniLotteryPoolToken( address( _voteToken ) );
+
+        _voteToken.setULPTaddress( address( _poolToken ) );
+
+        // Deploy the randomness provider.
+        randomnessProvider = new UniLotteryRandomnessProvider();
+
+        // Set the Lottery Factory contract address, and initialize it!
+        UniLotteryLotteryFactory _lotteryFactory = 
+            UniLotteryLotteryFactory( _lotteryFactoryAddr );
+
+        // Initialize the lottery factory, setting it to use the
+        // specified Storage Factory.
+        // After this point, factory states become immutable.
+        _lotteryFactory.initialize( _storageFactoryAddr );
+
+        // Now, deploy and set the default config generator address.
+        lotteryConfigGenerator = new UniLotteryConfigGenerator();
+
+        // Set the immutable variables to their temporary placeholders.
+        lotteryFactory = _lotteryFactory;
+        voteToken = _voteToken;
+        poolShareToken = _poolToken;
+
+        // Set the first Owner-Approved address as the OWNER_ADDRESS
+        // itself.
+        ownerApprovedAddresses[ OWNER_ADDRESS ] = true;
+    }
+
+
+    /** PAYABLE [ IN ] <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+     *
+     *  The Fallback Payable function.
+     *  This function is used by ongoing lotteries on their finish,
+     *  to transfer all pool-belonging funds (initial funds + profits)
+     *  back to the pool.
+     *
+     *  Also, can be used by other actors, to transfer Ether into 
+     *  the pool without getting ULPT in exchange.
+     */ 
+    receive () external payable 
+    {
+        emit FallbackCalledWithValue( msg.sender, msg.value );
+    }
+
+
+    /**
+     *  UNUSED: Currently unused, because as of current version,
+     *          the pool is always inactive - only Owner can use it.
+     *
+     *  Owner-Only methods for disabling/enabling the pool.
+     *  changes the "isPoolActive" state variable, which restricts/allows
+     *  external actors to join/manage a pool.
+     */
+    /*function owner_ActivatePool() external ownerOnly {
+        isPoolActive = true;
+        emit PoolActivated();
+    }
+    
+    function owner_DisablePool()  external ownerOnly {
+        isPoolActive = false;
+        emit PoolDisabled();
+    }*/
+
+
+    /**
+     *  Get total funds of the pool -- the pool balance, and all the
+     *  initial funds of every currently-ongoing lottery.
+     */
+    function totalPoolFunds()    public view
+    returns( uint256 ) 
+    {
+        // Get All Active Lotteries initial funds.
+        uint lotteryBalances = 0;
+        for( uint i = 0; i < ongoingLotteryList.length; i++ ) {
+            lotteryBalances += 
+                ongoingLotteryList[ i ].getActiveInitialFunds();
+        }
+        return address(this).balance + lotteryBalances;
+    }
+
+    /**
+     *  Get current pool stats - number of poolholders, 
+     *  number of voters, etc.
+     */
+    function getPoolStats()
+                                                public view
+    returns( 
+        uint32 _poolHolderCount,
+        uint32 _voterCount,
+        uint32 _numberOfLotteriesPerformed,
+        uint _totalPoolFunds,
+        uint _currentPoolBalance )
+    {
+        _poolHolderCount    = uint32( poolShareToken.holderCount() );
+        _voterCount         = uint32( voteToken.holderCount() );
+        _numberOfLotteriesPerformed = uint32( allLotteriesPerformed.length );
+        _totalPoolFunds     = totalPoolFunds();
+        _currentPoolBalance = address( this ).balance;
+    }
+
+
+    /**
+     *  Sync current pool contract balance with currentPoolBalance
+     *  tracker state variable.
+     *  This variable is used to track fallback function calls, and
+     *  is vital to the lotteryFinish() function, where it's used
+     *  to check how much funds lottery returned back to the pool.
+     *
+     *  This function is mainly used by a finishing lottery - because
+     *  lottery contract calls functions in this order:
+     *  1. syncCurrentPoolBalance()
+     *  2. transfer funds to pool fallback using .transfer()
+     *  3. lotteryFinish().
+     *
+     *  Lottery contract calls them in this order, to ensure that
+     *  currentPoolBalance is properly synced in lotteryFinish().
+     */
+    function syncCurrentPoolBalance()   external 
+    {
+        currentPoolBalance = address( this ).balance;
+    }
+
+
+    /** PAYABLE [ IN ] <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+     *
+     *  Provide liquidity into the pool, and become a pool shareholder.
+     *  - Function accepts Ether payments (No minimum deposit),
+     *    and mints a proportionate number of ULPT tokens for the
+     *    sender.
+     */
+    function provideLiquidity() 
+                                    external 
+                                    payable 
+                                    activelyManaged
+    {
+        // Check & Lock Liquidity Re-Entrance Lock.
+        require( !liquidityOperationOngoing,
+                 "Liquidity provide/remove is currently ongoing!" );
+        liquidityOperationOngoing = true;
+
+        // Check for minimum deposit.
+        require( msg.value > MIN_DEPOSIT, "Deposit amount too low!" );
+
+        // Compute the pool share that the user should obtain with
+        // the amount he paid in this message -- that is, compute
+        // percentage of the total pool funds (with new liquidity
+        // added), relative to the ether transferred in this msg.
+
+        // TotalFunds can't be zero, because currently transfered 
+        // msg.value is already added to totalFunds.
+        //
+        // Also, "percentage" can't exceed 100%, because condition
+        // "totalPoolFunds() >= msg.value" is ALWAYS true, because
+        // msg.value is already added to totalPoolFunds before 
+        // execution of this function's body - transfers to 
+        // "payable" functions are executed before the function's
+        // body executes (Solidity docs).
+        //
+        uint percentage =   ( (100 * PERCENT) * msg.value ) / 
+                            ( totalPoolFunds() );
+
+        // Now, compute the amount of new ULPT tokens (x) to mint 
+        // for this new liquidity provided, according to formula,
+        // whose explanation is provided below.
+        //
+        // Here, we assume variables:
+        //
+        //  uintFormatPercentage: the "percentage" Solidity variable,
+        //      defined above, in (uint percentage = ...) statement.
+        //
+        //  x: the amount of ULPT tokens to mint for this liquidity 
+        //      provider, to maintain "percentage" ratio with the
+        //      ULPT's totalSupply after minting (newTotalSupply).
+        //
+        //  totalSupply: ULPT token's current total supply
+        //      (as returned from totalSupply() function).
+        //
+        //  Let's start the formula:
+        //
+        // ratio = uintFormatPercentage / (100 * PERCENT)
+        // newTotalSupply = totalSupply + x
+        //
+        // x / newTotalSupply    = ratio
+        // x / (totalSupply + x) = ratio
+        // x = ratio * (totalSupply + x)
+        // x = (ratio * totalSupply) + (ratio * x)
+        // x - (ratio * x) = (ratio * totalSupply) 
+        // (1 * x) - (ratio * x) = (ratio * totalSupply) 
+        // ( 1 - ratio ) * x = (ratio * totalSupply) 
+        // x = (ratio * totalSupply) / ( 1 - ratio )
+        //
+        //                  ratio * totalSupply
+        // x = ------------------------------------------------
+        //      1 - ( uintFormatPercentage / (100 * PERCENT) )
+        //
+        //
+        //                ratio * totalSupply * (100 * PERCENT)
+        // x = ---------------------------------------------------------------
+        //     ( 1 - (uintFormatPercentage / (100 * PERCENT)) )*(100 * PERCENT)
+        //
+        // Let's abbreviate "100 * PERCENT" to "100%".
+        //
+        //                      ratio * totalSupply * 100%
+        // x = ---------------------------------------------------------
+        //     ( 1 * 100% ) - ( uintFormatPercentage / (100%) ) * (100%)
+        //
+        //          ratio * totalSupply * 100%
+        // x = -------------------------------------
+        //          100% - uintFormatPercentage
+        //
+        //        (uintFormatPercentage / (100%)) * totalSupply * 100%
+        // x = -------------------------------------------------------
+        //          100% - uintFormatPercentage
+        //
+        //        (uintFormatPercentage / (100%)) * 100% * totalSupply
+        // x = -------------------------------------------------------
+        //          100% - uintFormatPercentage
+        //
+        //      uintFormatPercentage * totalSupply
+        // x = ------------------------------------
+        //         100% - uintFormatPercentage
+        //
+        // So, with our Solidity variables, that would be:
+        // ==================================================== //
+        //                                                      //
+        //                     percentage * totalSupply         //
+        //   amountToMint = ------------------------------      //
+        //                   (100 * PERCENT) - percentage       //
+        //                                                      //
+        // ==================================================== //
+        //
+        // We know that "percentage" is ALWAYS <= 100%, because
+        // msg.value is already added to address(this).balance before
+        // the payable function's body executes.
+        //
+        // However, notice that when "percentage" approaches 100%,
+        // the denominator approaches 0, and that's not good.
+        //
+        // So, we must ensure that uint256 precision is enough to
+        // handle such situations, and assign a "default" value for
+        // amountToMint if such situation occurs.
+        //
+        // The most prominent case when this situation occurs, is on
+        // the first-ever liquidity provide, when ULPT total supply is 
+        // zero, and the "percentage" value is 100%, because pool's
+        // balance was 0 before the operation.
+        //
+        // In such situation, we mint the 100 initial ULPT, which 
+        // represent the pool share of the first ever pool liquidity 
+        // provider, and that's 100% of the pool.
+        // 
+        // Also, we do the same thing (mint 100 ULPT tokens), on all
+        // on all other situations when "percentage" is too close to 100%,
+        // such as when there's a very tiny amount of liquidity left in
+        // the pool.
+        //
+        // We check for those conditions based on precision of uint256
+        // number type.
+        // We know, that 256-bit uint can store up to roughly 10^74
+        // base-10 values.
+        //
+        // Also, in our formula:
+        // "totalSupply" can go to max. 10^30 (in extreme cases).
+        // "percentage" up to 10^12 (with more-than-enough precision).
+        // 
+        // When multiplied, that's still only 10^(30+12) = 10^42 ,
+        // and that's still a long way to go to 10^74.
+        //
+        // So, the denominator "(100 * PERCENT) - percentage" can go down
+        // to 1 safely, we must only ensure that it's not zero - 
+        // and the uint256 type will take care of all precision needed.
+        //
+
+        if( poolShareToken.balanceOf( msg.sender ) == 0 )
+            emit NewPoolholderJoin( msg.sender, msg.value );
+
+
+        // If percentage is below 100%, and totalSupply is NOT ZERO, 
+        // work with the above formula.
+        if( percentage < (100 * PERCENT) &&
+            poolShareToken.totalSupply() != 0 )
+        {
+            // Compute the formula!
+            uint256 amountToMint = 
+                ( percentage * poolShareToken.totalSupply() ) /
+                (       (100 * PERCENT) - percentage        );
+
+            // Mint the computed amount.
+            poolShareToken.mintTokensForAccount( msg.sender, amountToMint );
+        }
+
+        // Else, if the newly-added liquidity percentage is 100% 
+        // (pool's balance was Zero before this liquidity provide), then
+        // just mint the initial 100 pool tokens.
+        else
+        {
+            poolShareToken.mintTokensForAccount( msg.sender,
+                100 * ( uint( 10 ) ** poolShareToken.decimals() ) );
+        }
+
+
+        // Update current pool balance tracker.
+        currentPoolBalance = address( this ).balance;
+
+        // Emit corresponding event, that liquidity has been added.
+        emit AddedLiquidity( msg.sender, msg.value );
+        // emitPoolStats();
+
+        // Un-Lock the Re-Entrancy Lock.
+        liquidityOperationOngoing = false;
+    }
+
+    /**
+     *  Get the current pool share (percentage) of a specified
+     *  address. Return the percentage, compute from ULPT data.
+     */
+    function getPoolSharePercentage( address holder ) 
+                                                        public view
+    returns ( uint percentage ) 
+    {
+        return  ( (100 * PERCENT) * poolShareToken.balanceOf( holder ) )
+                / poolShareToken.totalSupply();
+    }
+
+
+    /** PAYABLE [ OUT ] >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+     *
+     *  Remove msg.sender's pool liquidity share, and transfer it
+     *  back to msg.sender's wallet.
+     *  Burn the ULPT tokens that represented msg.sender's share
+     *  of the pool.
+     *  Notice that no activelyManaged modifier is present, which
+     *  means that users are able to withdraw their money anytime.
+     *
+     *  However, there's a caveat - if some lotteries are currently
+     *  ongoing, the pool's current reserve balance might not be 
+     *  enough to meet every withdrawer's needs.
+     *  
+     *  In such scenario, withdrawers have either have to (OR'd):
+     *  - Wait for ongoing lotteries to finish and return their 
+     *    funds back to the pool,
+     *  - TODO: Vote for forceful termination of lotteries
+     *    (vote can be done whether pool is active or not).
+     *  - TODO: Wait for OWNER to forcefully terminate lotteries.
+     *
+     *  Notice that last 2 options aren't going to be implemented
+     *  in this version, because, as the OWNER is going to be the 
+     *  only pool shareholder in the begginning, lottery participants
+     *  might see the forceful termination feature as an exit-scam 
+     *  threat, and this would damage project's reputation.
+     *
+     *  The feature is going to be implemented in later versions,
+     *  after security audits pass, pool is open to public,
+     *  and a significant amount of wallets join a pool.
+     */
+    function removeLiquidity( uint256 ulptAmount ) 
+                                                            external
+    {
+        // Check & Lock Liquidity Re-Entrance Lock.
+        require( !liquidityOperationOngoing,
+                 "Liquidity provide/remove is currently ongoing!" );
+        liquidityOperationOngoing = true;
+
+        // Find out the real liquidity owner of this call - 
+        // Check if the msg.sender is an approved-address, which can
+        // call this function on behalf of the true liquidity owner.
+        // Currently, this feature is only supported for OWNER_ADDRESS.
+        address payable liquidityOwner;
+
+        if( ownerApprovedAddresses[ msg.sender ] )
+            liquidityOwner = OWNER_ADDRESS;
+        else
+            liquidityOwner = msg.sender;
+
+        // Condition "balanceOf( liquidityOwner ) > 1" automatically checks if 
+        // totalSupply() of ULPT is not zero, so we don't have to check
+        // it separately.
+        require( poolShareToken.balanceOf( liquidityOwner ) > 1 &&
+                 ulptAmount != 0 &&
+                 ulptAmount <= poolShareToken.balanceOf( liquidityOwner ),
+                 "Specified ULPT token amount is invalid!" );
+
+        // Now, compute share percentage, and send the appropriate
+        // amount of Ether from pool's balance to liquidityOwner.
+        uint256 percentage = ( (100 * PERCENT) * ulptAmount ) / 
+                             poolShareToken.totalSupply();
+
+        uint256 shareAmount = ( totalPoolFunds() * percentage ) /
+                              (100 * PERCENT);
+
+        require( shareAmount <= address( this ).balance, 
+                 "Insufficient pool contract balance!" );
+
+        // Burn the specified amount of ULPT, thus removing the 
+        // holder's pool share.
+        poolShareToken.burnTokensFromAccount( liquidityOwner, ulptAmount );
+
+
+        // Transfer holder's fund share as ether to holder's wallet.
+        liquidityOwner.transfer( shareAmount );
+
+
+        // Update current pool balance tracker.
+        currentPoolBalance = address( this ).balance;
+        
+        // Emit appropriate events.
+        if( poolShareToken.balanceOf( liquidityOwner ) == 0 )
+            emit PoolholderWithdraw( liquidityOwner );
+
+        emit RemovedLiquidity( liquidityOwner, shareAmount );
+        // emitPoolStats();
+
+        // Un-Lock the Re-Entrancy Lock
+        liquidityOperationOngoing = false;
+    }
+
+
+    // =========== COMMENTED - OUT =========== //
+    //              Voted Section              //
+
+    /**
+     *  Provide voting rights for a poolholder who requires them,
+     *  by calling this function.
+     *  Voting rights are provided by giving the user an amount of
+     *  ULVT tokens, equal to his owned amount of ULPT tokens.
+     *  Voting rights can only be given to users who own at least
+     *  "minimumPoolSharesRequiredForVoting" percentage of pool.
+     */
+    /*function requireVotingRights() 
+                                            external 
+                                            activelyManaged
+    {
+        require( getPoolSharePercentage( msg.sender ) >=
+                 minimumPoolSharesRequiredForVoting,
+                 "Pool Share Percentage is too low for voting!" );
+
+        // Now, mint a number of ULVT, equal to the balance of ULPT.
+        voteToken.mintTokensForAccount( msg.sender, 
+            poolShareToken.balanceOf( msg.sender ) );
+
+        // Emit events.
+        emit VotingRightsGranted( msg.sender, 
+            voteToken.balanceOf( msg.sender ) );
+        // emitPoolStats();
+    }*/
+
+    /**
+     *  Forfeit the voting rights of msg.sender.
+     *  The user loses his voting rights, as his ULVT gets burned.
+     */
+    /*function forfeitVotingRights() 
+                                            external 
+                                            activelyManaged
+    {
+        uint256 balance = voteToken.balanceOf( msg.sender );
+        require( balance > 0, "ULVT balance is already zero!" );
+
+        voteToken.burnTokensFromAccount( msg.sender, balance );
+
+        emit VotingRightsForfeited( msg.sender, balance );
+        // emitPoolStats();
+    }*/
+
+
+    /**
+     *  Get user's voting right amount. User has rights, if:
+     *  - Has some ULVT,
+     *  - Pool share percentage is higher than minimum required.
+     *  @return ulvtAmount - An amount of ULVT (voting rights) that this 
+     *          user has. If not eligible for voting, return zero.
+     */
+    /*function getVotingRightAmount( address user ) public view
+    returns ( uint256 ulvtAmount )
+    {
+        uint256 balance = voteToken.balanceOf( user );
+        if( balance == 0 || (getPoolSharePercentage( user ) <
+                             minimumPoolSharesRequiredForVoting) )
+            return 0;
+        else
+            return balance;
+    }*/
+
+
+    // ======== Lottery Management Section ======== //
+
+    /**
+     *  TODO: In the future versions, votes will be executed in a 
+     *  voting engine implemented in "Votable" base contract, by 
+     *  using callback-based technology.
+     *
+     *  Votes will happen through vote() function, for specific VoteType, 
+     *  with specifed voteData. Voter is the msg.sender. 
+     *  Vote executes on specific callback attached to voteType.
+     *
+     *  Often, voteData is a hash, or index, into a mapping or array
+     *  of before-proposed vote datas.
+     *  Vote data propositions will happen through callbacks too, by
+     *  submitting "bytes" array into the engine, which is then 
+     *  later de-serialized internally in specific vote's callback.
+     *  
+     *  TODO: Introduce time-execution using Ethereum Alarm Clock,
+     *  after specific amount of time has passed since the vote.
+     *  Now, vote can last indefinitely.
+     */
+
+    // Check if lottery is currently ongoing.
+    function isLotteryOngoing( address lotAddr ) 
+                                                    external view
+    returns( bool ) {
+        return ongoingLotteries[ lotAddr ];
+    }
+
+    // =========== COMMENTED - OUT =========== //
+    //              Voted Section              //
+
+    // Get current regular mode Voting's lottery configs.
+    /*function getRegularModeVotedLotteryConfigs() 
+                                                    external view
+    returns ( VotedLotteryConfig[] memory ) {
+        return regularModeLotteryConfigs;
+    }*/
+
+    /**
+     *  Propose a new Lottery Config.
+     *  If Voting is currently ongoing, the config is appended to
+     *  current Voting data for specified lottery type.
+     *  If Voting is not currently ongoing, new Voting is started, and
+     *  the config is appended as the first element.
+     *
+     *  Currently, only Regular (Manual) voting mode is supported.
+     *  @param config - a config.
+     *  @param voteToo - if set, vote function is called too,
+     *      so the user who proposed a config also votes for it.
+     */
+    /*function proposeNewLotteryConfig( 
+            Lottery.LotteryConfig memory config, 
+            bool voteToo )                  
+                                    public
+                                    votingModeOnly
+                                    activelyManaged 
+                                    callerHasVotingRights( 5 * PERCENT )
+    {
+        // Check if maximum number of ongoing lotteries is not reached.
+        require( ongoingLotteryList.length < maxNumberOfOngoingLotteries,
+            "Maximum number of simultaneous lotteries is already reached!" );
+
+        // Check if number of current Voting candidates is not maximum.
+        require( regularModeLotteryConfigs.length <
+                 maxLotteryConfigVoteCandidates,
+                 "Maximum number of config canditates is already reached!" );
+
+        // Append config to candidates, and emit approppriate events.
+        VotedLotteryConfig memory vcfg;
+
+        vcfg.active = true;
+        vcfg.voteCount = 0;
+        vcfg.submissionDate = now;
+        vcfg.config = config;
+
+        regularModeLotteryConfigs.push( vcfg );
+
+        //if( regularModeLotteryConfigs.length == 1 )
+        //    emit NewLotteryVoteStarted( config, now );
+
+        emit NewConfigProposed( msg.sender, config,
+                regularModeLotteryConfigs.length - 1 );
+
+        if( voteToo )
+            voteLotteryConfig( 0, false );
+    }*/
+
+    /**
+     *  Vote for specific previously-proposed lottery config.
+     *  Config for which the user votes, gets its voteCount incremented
+     *  by the amount of ULVT the user has.
+     *  If a config reaches lottery start vote requirement, a new
+     *  lottery is started from that config.
+     *  User can vote for multiple configs, however lottery is 
+     *  started from the config which reaches vote requirement first.
+     *
+     *  @param configIndex - index of previously-proposed 
+     *      config in the voted lottery config array.
+     *
+     *  @param startLotteryIfWin - If current vote breaks the vote 
+     *      requirement, the voted config wins. 
+     *      If this param is set, in such event, startLottery()
+     *      function will get called too, on behalf of the current voter.
+     */
+    /*function voteLotteryConfig( 
+            uint configIndex, 
+            bool startLotteryIfWin )  
+                                        public
+                                        votingModeOnly
+                                        activelyManaged
+                                        callerHasBasicVotingRights
+    {
+        require( configIndex < regularModeLotteryConfigs.length,
+                 "Config index is invalid!" );
+
+        // Update config's vote count, and check for ending!
+        regularModeLotteryConfigs[ configIndex ].voteCount += 
+            getVotingRightAmount( msg.sender );
+
+        // Emit events.
+        emit Vote( msg.sender, VoteType.VOTE_LOTTERY_CONFIG, configIndex );
+
+        if( startLotteryIfWin && getVotePercentage( 
+                regularModeLotteryConfigs[ configIndex ].voteCount ) >= 
+                voteRequirement_LotteryStart )
+            startLottery();
+    }*/
+
+    /**
+     *  Start a lottery according to current run mode, if voting 
+     *  requirements are met and one config candidate wins.
+     *  Actual logic is implemented inside the private function.
+     */
+    /*function startLottery()     
+                                public
+                                votingModeOnly
+                                activelyManaged 
+                                callerHasBasicVotingRights
+    {
+        if( lotteryRunMode == LotteryRunMode.MANUAL )
+            startLotteryRegularMode();
+        else
+            require( false, "Other Run Modes are not supported yet!" );
+    }*/
+
+
+    /**
+     *  UNUSED: Currently, these values are set in lottery config.
+     *          Will be used only on public pool versions.
+     *
+     *  Set Owner's profit share percentage, and lottery fee percentage.
+     *  These values are written to final lottery config when launching
+     *  a new lottery.
+     */
+    /*function owner_SetProfitShare( uint percentage ) 
+                                                        external
+                                                        ownerOnly
+    {
+        require( percentage <= MAX_OWNER_PROFITS,
+                 "Profit share percentage too large!" );
+        ownerProfitShare = percentage;
+    }
+
+    function owner_SetLotteryOwnerFee( uint percentage ) 
+                                                        external
+                                                        ownerOnly
+    {
+        require( percentage <= MAX_OWNER_LOTTERY_FEE, 
+                 "Lottery fee percentage too large!" );
+        ownerLotteryFee = percentage;
+    }
+    */
+
+    /**
+     *  Ongoing (not-yet-completed) lottery finalization function.
+     *  - This function is called by a currently ongoing lottery, to
+     *    notify the pool about it's finishing.
+     *  - After lottery calls this function, lottery is removed from
+     *    ongoing lottery tracking list, and set to inactive.
+     *  - Lottery transfers the pool profit share and initial funds 
+     *    back to the pool before calling this function, so the
+     *    pool balance is already increased at the time this function
+     *    is called.
+     *    So, here we update the pool's total funds variable.
+     */
+    function lotteryFinish( 
+                uint totalReturn, 
+                uint profitAmount )
+                                            external
+                                            calledByOngoingLotteryOnly
+    {
+        // Remove the lottery from ongoing lottery list.
+        for( uint ind = 0; ind < ongoingLotteryList.length; ind++ ) {
+            if( address( ongoingLotteryList[ ind ] ) == msg.sender )
+            {
+                // Replace current element with the last element.
+                ongoingLotteryList[ ind ] = 
+                    ongoingLotteryList[ ongoingLotteryList.length - 1 ];
+
+                // Remove the last element from an array in Solidity-way.
+                ongoingLotteryList.pop();
+
+                break;
+            }
+        }
+
+        // "De-activate" this lottery.
+        //ongoingLotteries[ msg.sender ] = false;
+        delete ongoingLotteries[ msg.sender ];  // implies "false"
+
+        // Check if totalReturn and profitAmount are valid.
+        require( address(this).balance == (currentPoolBalance + totalReturn),
+                 "Lottery total return is invalid!" );
+
+        require( totalReturn == ( profitAmount + 
+                    Lottery( msg.sender ).getInitialFunds() ),
+                "Lottery profit amount is invalid!" );
+
+        // Update current pool balance.
+        currentPoolBalance = address(this).balance;
+
+        // Emit approppriate events.
+        emit LotteryFinished( msg.sender, totalReturn, profitAmount );
+        // emitPoolStats();
+
+        // If AUTO-MODE is currently set, schedule a next lottery
+        // start using the current AUTO-MODE parameters!
+        // Ignore the return value, because AUTO-MODE params might be
+        // invalid, and we don't want our finish function to fail
+        // just because of that.
+
+        if( lotteryRunMode == LotteryRunMode.AUTO )
+        {
+            autoMode_isLotteryCurrentlyOngoing = false;
+            autoMode_lastLotteryFinished = now;
+
+            scheduleAutoModeCallback();
+        }
+    }
+
+
+    /**
+     *  The Callback function which Randomness Provider will call
+     *  when executing the Scheduled Callback requests.
+     *
+     *  We use this callback for scheduling Auto-Mode lotteries - 
+     *  when one lottery finishes, another one is scheduled to run
+     *  after specified amount of time.
+     *
+     *  In this callback, we start the scheduled Auto-Mode lottery.
+     */
+    function scheduledCallback( uint256 /*requestID*/ ) 
+                                                                public
+    {
+        // At first, check if mode is AUTO (not changed).
+        if( lotteryRunMode != LotteryRunMode.AUTO )
+            return;
+
+        // Check if we're not X-Ceeding the number of auto-iterations.
+        if( autoMode_currentCycleIterations >= autoMode_maxNumberOfRuns )
+        {
+            autoMode_currentCycleIterations = 0;
+            return;
+        }
+
+        // Launch an auto-lottery using the currently set next
+        // lottery config!
+        // When this lottery finishes, and the mode is still AUTO,
+        // one more lottery will be started.
+
+        launchLottery( nextLotteryConfig );
+
+        // Set the time started, and increment iterations.
+        autoMode_isLotteryCurrentlyOngoing = true;
+        autoMode_lastLotteryStarted = now;
+        autoMode_currentCycleIterations++;
+    }
+
+
+    /**
+     *  The Randomness Provider-callable function, which is used to
+     *  ask pool for permission to execute lottery ending callback 
+     *  request with higher price than the pool-given funds for that
+     *  specific lottery's ending request, when lottery was created.
+     *
+     *  The function notifies the pool about the new and 
+     *  before-expected price, so the pool could compute a debt to
+     *  be paid to the Randomnes Provider in next request.
+     *
+     *  Here, we update our debt variable, which is the difference
+     *  between current and expected-before request price,
+     *  and we'll transfer the debt to Randomness Provider on next
+     *  request to Randomness Provider.
+     *
+     *  Notice, that we'll permit the execution of the lottery
+     *  ending callback only if the new price is not more than 
+     *  1.5x higher than before-expected price.
+     *
+     *  This is designed so, because the Randomness Provider will
+     *  call this function only if it has enough funds to execute the 
+     *  callback request, and just that the funds that we have transfered
+     *  for this specific lottery's ending callback before, are lower
+     *  than the current price of execution.
+     *
+     *  Why is this the issue? 
+     *  Lottery can last for several weeks, and we give the callback
+     *  execution funds for that specific lottery to Randomness Provider
+     *  only on that lottery's initialization.
+     *  So, after a few weeks, the Provable services might change the
+     *  gas & fee prices, so the callback execution request price 
+     *  might change.
+     */
+    function onLotteryCallbackPriceExceedingGivenFunds(
+            address /*lottery*/, 
+            uint currentRequestPrice,
+            uint poolGivenExpectedRequestPrice )
+                                                    external 
+                                                    randomnessProviderOnly
+    returns( bool callbackExecutionPermitted )
+    {
+        require( currentRequestPrice > poolGivenExpectedRequestPrice );
+        uint difference = currentRequestPrice - poolGivenExpectedRequestPrice;
+
+        // Check if the price difference is not bigger than the half
+        // of the before-expected pool-given price.
+        // Also, make sure that whole debt doesn't exceed 0.5 ETH.
+        if( difference <= ( poolGivenExpectedRequestPrice / 2 ) &&
+            ( randomnessProviderDebt + difference ) < ( (1 ether) / 2 ) )
+        {
+            // Update our debt, to pay back the difference later,
+            // when we transfer funds for the next request.
+            randomnessProviderDebt += difference;
+
+            // Return true - the callback request execution is permitted.
+            return true;
+        }
+
+        // The price difference is higher - deny the execution.
+        return false;
+    }
+
+
+    // ============== BETA-VERSION-ONLY FUNCTIONS ============== //
+
+    // Here are the Owner-Callable voting-skipping functions, to set 
+    // the next lottery config, lottery run mode, and other settings.
+    //
+    // When the final version is released, these functions will
+    // be removed, and every governance operation will be done
+    // through voting.
+
+    /**
+     *  Set the LotteryConfig to be used by the next lottery.
+     *  Owner-only callable.
+     */
+    function owner_noVoting_setNextLotteryConfig(
+            Lottery.LotteryConfig memory cfg )
+                                                    public
+                                                    ownerApprovedAddressOnly
+                                                    votingDisabledOnly
+    {
+        nextLotteryConfig = cfg;
+
+        emit NewConfigProposed( msg.sender, cfg, 0 );
+        // emitPoolStats();
+    }
+
+    /**
+     *  Set the Lottery Run Mode to be used for further lotteries.
+     *  It can be AUTO, or MANUAL (more about it on their descriptions).
+     */
+    function owner_noVoting_setRunMode(
+            LotteryRunMode runMode )
+                                                    external
+                                                    ownerApprovedAddressOnly
+                                                    votingDisabledOnly
+    {
+        // Check if it's one of allowed run modes.
+        require( runMode == LotteryRunMode.AUTO ||
+                 runMode == LotteryRunMode.MANUAL,
+                 "This Run Mode is not allowed in current state!" );
+
+        // Emit a change event, with old value and new value.
+        emit LotteryRunModeChanged( lotteryRunMode, runMode );
+
+        // Set the new run mode!
+        lotteryRunMode = runMode;
+
+        // emitPoolStats();
+    }
+
+    /**
+     *  Start a manual mode lottery from the previously set up
+     *  next lottery config!
+     */
+    function owner_noVoting_startManualModeLottery()
+                                                    external
+                                                    ownerApprovedAddressOnly
+                                                    votingDisabledOnly
+    {
+        // Check if config is set - just check if initial funds
+        // are a valid value.
+        require( nextLotteryConfig.initialFunds != 0,
+                 "Currently set next-lottery-config is invalid!" );
+
+        // Launch a lottery using our private launcher function!
+        launchLottery( nextLotteryConfig );
+
+        // emitPoolStats();
+    }
+
+
+    /**
+     *  Set an Auto-Mode lottery run mode parameters.
+     *  The auto-mode is implemented using Randomness Provider 
+     *  scheduled callback functionality, to schedule a lottery start
+     *  on specific intervals.
+     *
+     *  @param nextLotteryDelay - amount of time, in seconds, to wait
+     *      when last lottery finishes, to start the next lottery.
+     *
+     *  @param maxNumberOfRuns  - max number of lottery runs in this
+     *      Auto-Mode cycle. When it's reached, mode will switch to
+     *      MANUAL automatically.
+     *
+     *  @param startToo - if set, start the Auto-Mode cycle too.
+     */
+    function owner_noVoting_setAutoModeParameters(
+            uint nextLotteryDelay,
+            uint maxNumberOfRuns,
+            bool startToo )
+                                                    external
+                                                    ownerApprovedAddressOnly
+                                                    votingDisabledOnly
+    {
+        // Set params!
+        autoMode_nextLotteryDelay = nextLotteryDelay;
+        autoMode_maxNumberOfRuns = maxNumberOfRuns;
+
+        // If startToo is specified, start auto-mode cycle!
+        if( startToo )
+            owner_noVoting_startAutoModeCycle();
+
+        // emitPoolStats();
+    }
+
+    /**
+     *  Starts an Auto-Mode lottery running cycle with currently
+     *  specified Auto-Mode parameters.
+     *  Notice that we must be on Auto run-mode currently.
+     */
+    function owner_noVoting_startAutoModeCycle()
+                                                    public
+                                                    ownerApprovedAddressOnly
+                                                    votingDisabledOnly
+    {
+        // Check that we're on the Auto-Mode now.
+        require( lotteryRunMode == LotteryRunMode.AUTO,
+                 "Current Run Mode is not AUTO!" );
+
+        // Check if valid AutoMode params were specified.
+        require( autoMode_nextLotteryDelay >= minAutoModeLotteryDelay &&
+                 autoMode_maxNumberOfRuns != 0,
+                 "Invalid Auto-Mode params set!" );
+
+        // Reset the cycle iteration counter.
+        autoMode_currentCycleIterations = 0;
+
+        // Start the Auto-Mode cycle using a scheduled callback!
+        scheduledCallback( 0 );
+
+        // emitPoolStats();
+    }
+
+    /**
+     *  Set or Remove Owner-approved addresses.
+     *  These addresses are used to call ownerOnly functions on behalf
+     *  of the OWNER_ADDRESS (more detailed description above).
+     */
+    function owner_setOwnerApprovedAddress( address addr )
+                                                                external
+                                                                ownerOnly
+    {
+        ownerApprovedAddresses[ addr ] = true;
+    }
+
+    function owner_removeOwnerApprovedAddress( address addr )
+                                                                external
+                                                                ownerOnly
+    {
+        delete ownerApprovedAddresses[ addr ];
+    }
+
+
+    /**
+     *  ABIEncoderV2 - compatible getter for the nextLotteryConfig, or
+     *  the lastLotteryConfig LotteryConfig structures, 
+     *  which will be retuned as byte array internally, then internally
+     *  de-serialized on receive.
+     *
+     *  @param getLast - if set, return lastLotteryConfig.
+     *                   If not set, return nextLotteryConfig.
+     */
+    function get_Next_or_Last_LotteryConfig( bool getLast )
+                                                                external 
+                                                                view
+    returns( Lottery.LotteryConfig memory )
+    {
+        return ( getLast ? lastLotteryConfig : nextLotteryConfig );
+    }
+
+}
+
+
+
